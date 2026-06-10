@@ -920,14 +920,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await message.reply_text("🔍 *Resolving link redirects... / در حال بررسی لینک*", parse_mode="Markdown")
     url = await bypass_url(raw_url)
 
-    # Simple domain checks
-    social_domains = [
+    # Check if we should use yt-dlp to download (e.g. streaming format or video platform)
+    direct_file_extensions = (
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".apk", ".exe", ".msi", ".dmg", ".pdf", 
+        ".epub", ".docx", ".xlsx", ".pptx", ".jpg", ".jpeg", ".png", ".webp", ".gif", 
+        ".mp3", ".wav", ".ogg", ".mp4", ".mkv", ".avi", ".mov", ".flv"
+    )
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    
+    # Check streaming/playlist extension
+    is_streaming = any(ext in path for ext in (".m3u8", ".mpd", ".manifest"))
+    
+    # Check if known video/audio domains (including generic platforms)
+    media_domains = [
         "youtube.com", "youtu.be", "instagram.com", "tiktok.com",
-        "twitter.com", "x.com", "facebook.com", "fb.watch", "vimeo.com"
+        "twitter.com", "x.com", "facebook.com", "fb.watch", "vimeo.com",
+        "pornhub.com", "xvideos.com", "xnxx.com", "twitch.tv", "dailymotion.com",
+        "soundcloud.com", "spankbang.com", "redtube.com", "youporn.com", "tube8.com"
     ]
-    is_social = any(domain in url.lower() for domain in social_domains)
+    is_media_domain = any(domain in parsed.netloc.lower() for domain in media_domains)
+    
+    # Determine if it's likely a direct static file
+    is_direct_file = False
+    if any(path.endswith(ext) for ext in direct_file_extensions) and not is_streaming:
+        is_direct_file = True
 
-    if is_social:
+    # Use yt-dlp if it's a media domain, streaming format, or not a direct file link
+    use_ytdlp = is_media_domain or is_streaming or not is_direct_file
+
+    if use_ytdlp:
         await status_msg.edit_text("🔍 *Extracting media info... / دریافت اطلاعات*", parse_mode="Markdown")
         loop = asyncio.get_running_loop()
         
