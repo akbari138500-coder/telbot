@@ -14,7 +14,7 @@ from urllib.parse import urlparse, unquote
 import aiohttp
 import yt_dlp
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -810,7 +810,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f" └─ *Usage Statistics:* View stats with `/stats`.\n\n"
         f"✨ *Start by sending a link or a file!*"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    keyboard = [
+        [
+            KeyboardButton("🔍 Search / جستجو"),
+            KeyboardButton("📊 Stats / آمار")
+        ],
+        [
+            KeyboardButton("❓ Help / راهنما")
+        ]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Searches YouTube and returns top 5 results with inline select buttons."""
@@ -904,6 +914,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     text = message.text.strip()
+
+    # Handle Bottom Menu Buttons
+    if text == "🔍 Search / جستجو":
+        await message.reply_text("🔎 *To search YouTube, type:* `/search <query>`\n\n*Example:* `/search coldplay`", parse_mode="Markdown")
+        return
+    elif text == "📊 Stats / آمار":
+        await stats_command(update, context)
+        return
+    elif text == "❓ Help / راهنما":
+        await start_command(update, context)
+        return
 
     # Trimming State Check
     if user_id in USER_STATES and USER_STATES[user_id]['state'] == 'AWAITING_TRIM':
