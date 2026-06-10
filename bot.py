@@ -38,13 +38,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-MAX_PART_SIZE = 49 * 1024 * 1024  # 49MB (Telegram limit is 50MB)
+MAX_PART_SIZE = 48 * 1024 * 1024  # 48MB hard limit (Telegram rejects at 50MB)
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # State Cache & Databases
 URL_CACHE = {}          # Store media details (uuid -> data)
 USER_STATES = {}        # User states (user_id -> {'state': '...', 'url_id': '...'})
-download_queue = asyncio.Queue()  # Global sequential task queue
+download_queue: asyncio.Queue = asyncio.Queue()  # Global sequential task queue
 
 # =====================================================================
 # Database Manager (SQLite)
@@ -308,67 +308,69 @@ class ProgressTracker:
 # =====================================================================
 async def download_direct_resilient(url, filepath, progress_message, bot, custom_name=None):
     """Downloads a file with HTTP Range support to auto-resume on network drops."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
+    UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     downloaded = 0
     total_size = 0
     retries = 5
-    
-    async with aiohttp.ClientSession(headers=headers) as session:
+    last_update = 0
+
+    async with aiohttp.ClientSession() as session:
         while retries > 0:
             try:
+                req_headers = {"User-Agent": UA}
                 if os.path.exists(filepath):
                     downloaded = os.path.getsize(filepath)
-                
-                # Request only remaining bytes if we have a partial download
+
                 if downloaded > 0:
-                    headers['Range'] = f"bytes={downloaded}-"
-                else:
-                    headers.pop('Range', None)
-                
-                async with session.get(url, allow_redirects=True) as response:
-                    # 206 is Partial Content, 200 is Full Content
+                    req_headers['Range'] = f"bytes={downloaded}-"
+
+                async with session.get(
+                    url,
+                    headers=req_headers,
+                    allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_read=60)
+                ) as response:
+                    # 416 = Range not satisfiable → file already complete
+                    if response.status == 416:
+                        break
+                    # Non-Range servers return 200 for Range requests → treat as full restart
                     if response.status not in (200, 206):
-                        # Reset download if Range request was rejected by server
-                        downloaded = 0
-                        headers.pop('Range', None)
-                        async with session.get(url, allow_redirects=True) as retry_resp:
-                            response = retry_resp
-                    
+                        raise Exception(f"Server returned HTTP {response.status}")
+
                     if total_size == 0:
-                        total_size = int(response.headers.get("Content-Length", 0)) + downloaded
-                        
-                        # Set Custom Naming
+                        content_length = int(response.headers.get("Content-Length", 0))
+                        total_size = content_length + (downloaded if response.status == 206 else 0)
+
                         if downloaded == 0:
-                            cd = response.headers.get("Content-Disposition")
+                            # Detect filename from headers
+                            cd = response.headers.get("Content-Disposition", "")
                             if cd:
-                                fname_match = re.findall(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\']+)["\']?', cd)
+                                fname_match = re.findall(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\'\s;]+)', cd)
                                 if fname_match:
-                                    filename = unquote(fname_match[0])
-                                    filepath = os.path.join(os.path.dirname(filepath), filename)
-                                    
-                            content_type = response.headers.get("Content-Type", "").split(";")[0]
-                            if content_type:
+                                    filepath = os.path.join(os.path.dirname(filepath), unquote(fname_match[0]))
+
+                            content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
+                            if content_type and not os.path.splitext(filepath)[1]:
                                 ext = mimetypes.guess_extension(content_type)
-                                if ext and not filepath.endswith(ext):
+                                if ext:
                                     filepath += ext
-                            
+
                             if custom_name:
                                 _, ext = os.path.splitext(filepath)
                                 if not os.path.splitext(custom_name)[1] and ext:
                                     custom_name += ext
                                 filepath = os.path.join(os.path.dirname(filepath), custom_name)
 
-                    mode = "ab" if downloaded > 0 else "wb"
-                    last_update = 0
-                    
+                    # If server ignored Range and returned 200, restart from beginning
+                    mode = "ab" if downloaded > 0 and response.status == 206 else "wb"
+                    if mode == "wb":
+                        downloaded = 0
+
                     with open(filepath, mode) as f:
-                        async for chunk in response.content.iter_chunked(512 * 1024):  # 512KB chunks
+                        async for chunk in response.content.iter_chunked(512 * 1024):
                             f.write(chunk)
                             downloaded += len(chunk)
-                            
+
                             now = time.time()
                             if now - last_update > 3.0:
                                 last_update = now
@@ -376,26 +378,26 @@ async def download_direct_resilient(url, filepath, progress_message, bot, custom
                                 total_str = f"{total_size / (1024*1024):.1f} MB" if total_size > 0 else "unknown"
                                 downloaded_str = f"{downloaded / (1024*1024):.1f} MB"
                                 bar_str = get_progress_bar(percent) if total_size > 0 else "`Downloading...`"
-                                
                                 text = (
-                                    f"📥 *DOWNLOADING DIRECT FILE / دانلود لینک مستقیم* 📥\n"
+                                    f"📥 *DOWNLOADING / دانلود لینک مستقیم*\n"
                                     f"{DIVIDER}\n"
-                                    f"📁 *Name:* `{os.path.basename(filepath)[:35]}`\n"
-                                    f"⚡ *Progress:* {bar_str}\n"
-                                    f"📦 *Size:* `{downloaded_str}` / `{total_str}`"
+                                    f"📁 `{os.path.basename(filepath)[:40]}`\n"
+                                    f"⚡ {bar_str}\n"
+                                    f"📦 `{downloaded_str}` / `{total_str}`"
                                 )
                                 try:
                                     await progress_message.edit_text(text, parse_mode="Markdown")
                                 except Exception:
                                     pass
-                    break  # Success
+                    break  # Download complete
+
             except Exception as e:
                 retries -= 1
-                logger.warning(f"Download failed: {e}. Retries remaining: {retries}")
-                await asyncio.sleep(2)
+                logger.warning(f"Direct download error (retries left {retries}): {e}")
+                await asyncio.sleep(3)
                 if retries == 0:
-                    raise e
-                    
+                    raise Exception(f"Download failed after all retries: {e}") from e
+
     return filepath
 
 def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
@@ -828,7 +830,10 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
                             filename=filename,
                             thumbnail=thumb_file,
                             reply_to_message_id=reply_to_message_id,
-                            supports_streaming=True
+                            supports_streaming=True,
+                            read_timeout=120,
+                            write_timeout=120,
+                            connect_timeout=30,
                         )
                 except Exception:
                     # Fallback to document
@@ -841,7 +846,10 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
                             document=f,
                             filename=filename,
                             thumbnail=thumb_file,
-                            reply_to_message_id=reply_to_message_id
+                            reply_to_message_id=reply_to_message_id,
+                            read_timeout=120,
+                            write_timeout=120,
+                            connect_timeout=30,
                         )
             else:
                 with open(filepath, "rb") as f:
@@ -1119,7 +1127,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_pornhub_search(query, page=1):
     """Search Pornhub via yt-dlp (most reliable) with HTML scraping as fallback."""
     import urllib.parse
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # Must use get_running_loop() in async context
     per_page = 5
     offset = (page - 1) * per_page
 
@@ -3252,18 +3260,13 @@ async def add_conversion_to_queue(file_id, filename, target_format, message_to_r
 # context_bot_wrapper is defined earlier in the file (before ProgressTracker)
 
 async def queue_worker(bot):
-    """Processes downloads sequentially from queue."""
+    """Processes downloads sequentially from queue. Auto-restarts on crash."""
     while True:
         task = await download_queue.get()
         try:
-            if asyncio.iscoroutinefunction(task):
-                await task()
-            elif asyncio.iscoroutine(task):
-                await task
-            else:
-                await task()
+            await task()
         except Exception as e:
-            logger.error(f"Error executing queue task: {e}", exc_info=True)
+            logger.error(f"Queue task error: {e}", exc_info=True)
         finally:
             download_queue.task_done()
 
@@ -3288,9 +3291,9 @@ async def start_web_server():
 
 async def main_async(application):
     await start_web_server()
-    # Start background queue worker
-    asyncio.create_task(queue_worker(application.bot))
-    
+    task = asyncio.create_task(queue_worker(application.bot))
+    task.add_done_callback(lambda t: logger.error(f"Queue worker crashed: {t.exception()}") if not t.cancelled() and t.exception() else None)
+
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
@@ -3299,10 +3302,12 @@ async def main_async(application):
         await asyncio.sleep(3600)
 
 async def local_main_async(application):
-    asyncio.create_task(queue_worker(application.bot))
+    task = asyncio.create_task(queue_worker(application.bot))
+    task.add_done_callback(lambda t: logger.error(f"Queue worker crashed: {t.exception()}") if not t.cancelled() and t.exception() else None)
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
+    logger.info("Bot started. Listening for messages...")
     while True:
         await asyncio.sleep(3600)
 
