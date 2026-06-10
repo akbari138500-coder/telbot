@@ -1154,6 +1154,7 @@ async def run_pornhub_search(query, page=1):
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 },
+                **get_ydl_cookie_opts(),
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(search_url, download=False)
@@ -1794,6 +1795,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'no_warnings': True,
                     'noplaylist': True,
                     'extract_flat': True,
+                    **get_ydl_cookie_opts(),
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(f"ytsearch1:{track_artist} - {track_title}", download=False)
@@ -2104,7 +2106,23 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         # Admin: save cookies.txt for bot detection bypass
-        if filename.lower() == "cookies.txt" and ADMIN_USER_ID and str(user_id) == str(ADMIN_USER_ID):
+        if filename.lower() == "cookies.txt":
+            is_admin = False
+            if ADMIN_USER_ID and ADMIN_USER_ID.strip() and "YOUR_ADMIN_USER_ID" not in ADMIN_USER_ID:
+                if str(user_id) == str(ADMIN_USER_ID):
+                    is_admin = True
+            else:
+                is_admin = True  # Allow if no admin configured yet
+
+            if not is_admin:
+                await message.reply_text(
+                    f"❌ Only the admin can upload cookies.\n"
+                    f"Your Telegram User ID is: `{user_id}`\n"
+                    f"Set `ADMIN_USER_ID={user_id}` in your `.env` file.",
+                    parse_mode="Markdown"
+                )
+                return
+
             status = await message.reply_text("🍪 *Saving cookies.txt...*", parse_mode="Markdown")
             tg_file = await context.bot.get_file(file_id)
             await tg_file.download_to_drive(COOKIES_FILE)
@@ -3320,8 +3338,22 @@ async def start_web_server():
 async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to manage cookies.txt for bot-detection bypass."""
     user_id = update.effective_user.id
-    if ADMIN_USER_ID and str(user_id) != str(ADMIN_USER_ID):
-        await update.message.reply_text("❌ This command is only available to admins.")
+    
+    is_admin = False
+    if ADMIN_USER_ID and ADMIN_USER_ID.strip() and "YOUR_ADMIN_USER_ID" not in ADMIN_USER_ID:
+        if str(user_id) == str(ADMIN_USER_ID):
+            is_admin = True
+    else:
+        is_admin = True  # Allow if no admin configured yet
+
+    if not is_admin:
+        await update.message.reply_text(
+            f"❌ This command is only available to admins.\n"
+            f"Your Telegram User ID is: `{user_id}`\n"
+            f"Please add this ID to your `.env` file to become the admin:\n"
+            f"`ADMIN_USER_ID={user_id}`",
+            parse_mode="Markdown"
+        )
         return
 
     if os.path.exists(COOKIES_FILE):
