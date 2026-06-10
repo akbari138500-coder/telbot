@@ -67,6 +67,36 @@ class DbManager:
                     timestamp REAL
                 )
             """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS tokens (
+                    user_id INTEGER PRIMARY KEY,
+                    github_token TEXT,
+                    gitlab_token TEXT
+                )
+            """)
+
+    def set_github_token(self, user_id, token):
+        with self.conn:
+            self.conn.execute("""
+                INSERT INTO tokens (user_id, github_token) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET github_token = excluded.github_token
+            """, (user_id, token))
+
+    def set_gitlab_token(self, user_id, token):
+        with self.conn:
+            self.conn.execute("""
+                INSERT INTO tokens (user_id, gitlab_token) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET gitlab_token = excluded.gitlab_token
+            """, (user_id, token))
+
+    def get_tokens(self, user_id):
+        with self.conn:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT github_token, gitlab_token FROM tokens WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row:
+                return row[0], row[1]
+            return None, None
 
     def log_download(self, user_id, download_type, file_size):
         with self.conn:
@@ -1198,6 +1228,246 @@ async def send_ph_preview(bot, chat_id, preview_url, title, reply_to_message_id)
             logger.error(f"Failed to send preview locally: {ex}")
             await bot.send_message(chat_id=chat_id, text="❌ Failed to load preview video.")
 
+# =====================================================================
+# GitHub & GitLab Downloader Utility Functions
+# =====================================================================
+def parse_git_url(url):
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    path = parsed.path.strip("/")
+    parts = [p for p in path.split("/") if p]
+    
+    is_github = "github.com" in parsed.netloc.lower()
+    is_gitlab = "gitlab.com" in parsed.netloc.lower() or "gitlab" in parsed.netloc.lower()
+    
+    if not is_github and not is_gitlab:
+        return None
+        
+    platform = "github" if is_github else "gitlab"
+    
+    if len(parts) < 2:
+        return None
+        
+    owner = parts[0]
+    repo = parts[1]
+    
+    result = {
+        'platform': platform,
+        'owner': owner,
+        'repo': repo,
+        'type': 'repo',
+        'branch': None,
+        'path': None,
+        'tag': None
+    }
+    
+    if is_github:
+        if len(parts) >= 4:
+            action = parts[2]
+            if action == "blob":
+                result['type'] = 'file'
+                result['branch'] = parts[3]
+                result['path'] = "/".join(parts[4:])
+            elif action == "tree":
+                result['type'] = 'folder'
+                result['branch'] = parts[3]
+                result['path'] = "/".join(parts[4:])
+            elif action in ("releases", "tags"):
+                if len(parts) >= 5 and parts[3] == "tag":
+                    result['type'] = 'release_tag'
+                    result['tag'] = parts[4]
+                else:
+                    result['type'] = 'releases'
+    else:
+        if "-" in parts:
+            try:
+                dash_idx = parts.index("-")
+                if len(parts) > dash_idx + 2:
+                    action = parts[dash_idx + 1]
+                    if action == "blob":
+                        result['type'] = 'file'
+                        result['branch'] = parts[dash_idx + 2]
+                        result['path'] = "/".join(parts[dash_idx + 3:])
+                    elif action == "tree":
+                        result['type'] = 'folder'
+                        result['branch'] = parts[dash_idx + 2]
+                        result['path'] = "/".join(parts[dash_idx + 3:])
+                    elif action in ("releases", "tags"):
+                        result['type'] = 'releases'
+            except ValueError:
+                pass
+                
+    return result
+
+async def download_github_folder_recursive(session, owner, repo, path, branch, local_dir, token=None):
+    import aiofiles
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+    
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    params = {}
+    if branch:
+        params["ref"] = branch
+        
+    async with session.get(url, headers=headers, params=params) as resp:
+        if resp.status != 200:
+            raise Exception(f"GitHub API error: {resp.status}")
+        items = await resp.json()
+        
+    for item in items:
+        item_name = item["name"]
+        item_type = item["type"]
+        item_path = item["path"]
+        
+        local_item_path = os.path.join(local_dir, item_name)
+        
+        if item_type == "dir":
+            os.makedirs(local_item_path, exist_ok=True)
+            await download_github_folder_recursive(session, owner, repo, item_path, branch, local_item_path, token)
+        elif item_type == "file":
+            download_url = item["download_url"]
+            raw_headers = {}
+            if token:
+                raw_headers["Authorization"] = f"token {token}"
+            async with session.get(download_url, headers=raw_headers) as file_resp:
+                if file_resp.status == 200:
+                    async with aiofiles.open(local_item_path, "wb") as f:
+                        await f.write(await file_resp.read())
+
+async def download_gitlab_folder_recursive(session, owner, repo, path, branch, local_dir, token=None):
+    import urllib.parse
+    import aiofiles
+    project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+    url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/tree"
+    headers = {}
+    if token:
+        headers["PRIVATE-TOKEN"] = token
+        
+    params = {"path": path, "recursive": True}
+    if branch:
+        params["ref"] = branch
+        
+    async with session.get(url, headers=headers, params=params) as resp:
+        if resp.status != 200:
+            raise Exception(f"GitLab API error: {resp.status}")
+        items = await resp.json()
+        
+    for item in items:
+        item_type = item["type"]
+        item_path = item["path"]
+        
+        rel_path = os.path.relpath(item_path, path)
+        local_item_path = os.path.join(local_dir, rel_path)
+        
+        if item_type == "tree":
+            os.makedirs(local_item_path, exist_ok=True)
+        elif item_type == "blob":
+            os.makedirs(os.path.dirname(local_item_path), exist_ok=True)
+            enc_path = urllib.parse.quote_plus(item_path)
+            file_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/files/{enc_path}/raw"
+            file_params = {}
+            if branch:
+                file_params["ref"] = branch
+            async with session.get(file_url, headers=headers, params=file_params) as file_resp:
+                if file_resp.status == 200:
+                    async with aiofiles.open(local_item_path, "wb") as f:
+                        await f.write(await file_resp.read())
+
+async def handle_git_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, git_info):
+    message = update.message
+    user_id = update.effective_user.id
+    
+    platform = git_info['platform']
+    owner = git_info['owner']
+    repo = git_info['repo']
+    item_type = git_info['type']
+    branch = git_info['branch']
+    path = git_info['path']
+    
+    url_id = uuid.uuid4().hex[:8]
+    URL_CACHE[url_id] = {
+        'is_git': True,
+        'git_info': git_info
+    }
+    
+    text = (
+        f"🤖 *GIT DOWNLOADER / دانلودر گیت* 🤖\n"
+        f"{DIVIDER}\n"
+        f"🌐 *Platform:* `{platform.upper()}`\n"
+        f"👤 *Owner:* `{owner}`\n"
+        f"📦 *Repository:* `{repo}`\n"
+        f"📂 *Type:* `{item_type.upper()}`\n"
+    )
+    if branch:
+        text += f"🌿 *Branch:* `{branch}`\n"
+    if path:
+        text += f"📁 *Path:* `{path}`\n"
+        
+    gh_token, gl_token = db.get_tokens(user_id)
+    has_token = bool(gh_token if platform == "github" else gl_token)
+    
+    if has_token:
+        text += "🔑 *Auth:* Stored Token will be used.\n"
+    else:
+        text += "🔓 *Auth:* Public request (Use `/github_token` or `/gitlab_token` to set tokens for private repos).\n"
+        
+    keyboard = []
+    
+    if item_type == "repo":
+        keyboard.append([
+            InlineKeyboardButton("📦 Download Repo (.zip)", callback_data=f"gitdl:{url_id}:repo"),
+            InlineKeyboardButton("🏷 List Releases", callback_data=f"gitdl:{url_id}:releases")
+        ])
+    elif item_type == "folder":
+        keyboard.append([
+            InlineKeyboardButton("📁 Download Folder (.zip)", callback_data=f"gitdl:{url_id}:folder")
+        ])
+    elif item_type == "file":
+        keyboard.append([
+            InlineKeyboardButton("📄 Download File", callback_data=f"gitdl:{url_id}:file")
+        ])
+    elif item_type in ("releases", "release_tag"):
+        keyboard.append([
+            InlineKeyboardButton("🏷 List Release Assets", callback_data=f"gitdl:{url_id}:releases")
+        ])
+        
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"gitdl:{url_id}:cancel")])
+    
+    await message.reply_text(
+        text + "\n👇 *Choose download option:*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def github_token_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    token = " ".join(context.args).strip()
+    if not token:
+        await update.message.reply_text("❌ Please specify your GitHub Personal Access Token:\n`/github_token ghp_xxxx` (or `/github_token clear` to delete)")
+        return
+    
+    if token.lower() == "clear":
+        db.set_github_token(user_id, None)
+        await update.message.reply_text("🗑 *GitHub Personal Access Token cleared!*", parse_mode="Markdown")
+    else:
+        db.set_github_token(user_id, token)
+        await update.message.reply_text("🔑 *GitHub Personal Access Token saved successfully!*", parse_mode="Markdown")
+
+async def gitlab_token_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    token = " ".join(context.args).strip()
+    if not token:
+        await update.message.reply_text("❌ Please specify your GitLab Personal Access Token:\n`/gitlab_token glpat-xxxx` (or `/gitlab_token clear` to delete)")
+        return
+    
+    if token.lower() == "clear":
+        db.set_gitlab_token(user_id, None)
+        await update.message.reply_text("🗑 *GitLab Personal Access Token cleared!*", parse_mode="Markdown")
+    else:
+        db.set_gitlab_token(user_id, token)
+        await update.message.reply_text("🔑 *GitLab Personal Access Token saved successfully!*", parse_mode="Markdown")
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays personal statistics, or global statistics if requested by Admin."""
     user_id = update.effective_user.id
@@ -1391,6 +1661,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Bypass redirects (Link Shorteners)
     status_msg = await message.reply_text("🔍 *Resolving link redirects... / در حال بررسی لینک*", parse_mode="Markdown")
     url = await bypass_url(raw_url)
+
+    # Check if URL is GitHub or GitLab
+    git_info = parse_git_url(url)
+    if git_info:
+        await status_msg.delete()
+        await handle_git_flow(update, context, git_info)
+        return
 
     # Check if URL is Spotify
     is_spotify = "spotify.com/track/" in url.lower() or "spotify.link" in url.lower()
@@ -1832,6 +2109,271 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = query.data.split(":")
     action = data[0]
+
+    # Handle GitHub & GitLab Downloader Actions
+    if action == "gitdl":
+        url_id = data[1]
+        choice = data[2]
+        
+        if choice == "cancel":
+            await query.delete_message()
+            URL_CACHE.pop(url_id, None)
+            return
+            
+        cached = URL_CACHE.get(url_id)
+        if not cached or not cached.get('is_git'):
+            await query.edit_message_text("❌ Session expired. Please send link again.")
+            return
+            
+        git_info = cached['git_info']
+        platform = git_info['platform']
+        owner = git_info['owner']
+        repo = git_info['repo']
+        branch = git_info['branch']
+        path = git_info['path']
+        
+        gh_token, gl_token = db.get_tokens(user_id)
+        token = gh_token if platform == "github" else gl_token
+        
+        if choice == "releases":
+            await query.edit_message_text("🔍 *Fetching releases... / دریافت ریلیزها*", parse_mode="Markdown")
+            
+            async def release_task():
+                try:
+                    headers = {"Accept": "application/vnd.github.v3+json"}
+                    if platform == "github":
+                        if token:
+                            headers["Authorization"] = f"token {token}"
+                        url = f"https://api.github.com/repos/{owner}/{repo}/releases"
+                    else:
+                        if token:
+                            headers["PRIVATE-TOKEN"] = token
+                        import urllib.parse
+                        project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+                        url = f"https://gitlab.com/api/v4/projects/{project_id}/releases"
+                        
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, headers=headers) as resp:
+                            if resp.status != 200:
+                                await query.message.reply_text(f"❌ Failed to fetch releases: HTTP {resp.status}")
+                                return
+                            releases_data = await resp.json()
+                            
+                    if not releases_data:
+                        await query.message.reply_text("❌ No releases found for this repository.")
+                        return
+                        
+                    text = f"🏷 *RELEASES / ریلیزهای مخزن* `{repo}`\n{DIVIDER}\n"
+                    keyboard = []
+                    
+                    if platform == "github":
+                        latest = releases_data[0]
+                        tag_name = latest.get("tag_name", "Latest")
+                        text += f"Latest Release: *{tag_name}*\n\n"
+                        
+                        assets = latest.get("assets", [])
+                        for asset in assets:
+                            name = asset.get("name")
+                            dl_url = asset.get("browser_download_url")
+                            text += f" ├─ `{name}`\n"
+                            
+                            asset_url_id = uuid.uuid4().hex[:8]
+                            URL_CACHE[asset_url_id] = {
+                                'url': dl_url,
+                                'title': name,
+                            }
+                            keyboard.append([InlineKeyboardButton(f"📥 {name[:30]}", callback_data=f"git_asset_dl:{asset_url_id}")])
+                    else:
+                        latest = releases_data[0]
+                        tag_name = latest.get("tag_name", "Latest")
+                        text += f"Latest Release: *{tag_name}*\n\n"
+                        
+                        links = latest.get("assets", {}).get("links", [])
+                        for link in links:
+                            name = link.get("name")
+                            dl_url = link.get("url")
+                            text += f" ├─ `{name}`\n"
+                            
+                            asset_url_id = uuid.uuid4().hex[:8]
+                            URL_CACHE[asset_url_id] = {
+                                'url': dl_url,
+                                'title': name,
+                            }
+                            keyboard.append([InlineKeyboardButton(f"📥 {name[:30]}", callback_data=f"git_asset_dl:{asset_url_id}")])
+                            
+                    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="gitdl_cancel")])
+                    
+                    await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+                except Exception as e:
+                    logger.error(f"Failed to fetch releases: {e}")
+                    await query.message.reply_text(f"❌ *Failed to list releases:* `{str(e)[:150]}`")
+                    
+            await download_queue.put(release_task)
+            return
+            
+        await query.edit_message_text("⏳ *Processing Git download task... / در حال پردازش*", parse_mode="Markdown")
+        
+        async def git_dl_task():
+            try:
+                status_msg = await query.message.reply_text("🚀 *Git download task started...*")
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    bot = query.message.get_bot()
+                    chat_id = query.message.chat_id
+                    
+                    if choice == "repo":
+                        await status_msg.edit_text("📥 *Downloading Repository ZIP...*")
+                        zip_file = os.path.join(temp_dir, f"{repo}.zip")
+                        
+                        if platform == "github":
+                            ref_branch = branch
+                            if not ref_branch:
+                                headers = {"Accept": "application/vnd.github.v3+json"}
+                                if token:
+                                    headers["Authorization"] = f"token {token}"
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.get(f"https://api.github.com/repos/{owner}/{repo}", headers=headers) as r:
+                                        if r.status == 200:
+                                            repo_info = await r.json()
+                                            ref_branch = repo_info.get("default_branch", "main")
+                                        else:
+                                            ref_branch = "main"
+                            
+                            dl_url = f"https://api.github.com/repos/{owner}/{repo}/zipball/{ref_branch}"
+                            headers = {"Authorization": f"token {token}"} if token else {}
+                        else:
+                            import urllib.parse
+                            project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+                            dl_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/archive.zip"
+                            if branch:
+                                dl_url += f"?sha={branch}"
+                            headers = {"PRIVATE-TOKEN": token} if token else {}
+                            
+                        async with aiohttp.ClientSession(headers=headers) as session:
+                            async with session.get(dl_url, allow_redirects=True) as resp:
+                                if resp.status != 200:
+                                    await status_msg.edit_text(f"❌ Failed to download zip: HTTP {resp.status}")
+                                    return
+                                with open(zip_file, "wb") as f:
+                                    f.write(await resp.read())
+                                    
+                        await status_msg.edit_text("📤 *Uploading Repository ZIP...*")
+                        file_size = os.path.getsize(zip_file)
+                        db.log_download(user_id, "git_repo", file_size)
+                        
+                        with open(zip_file, "rb") as f:
+                            await bot.send_document(chat_id=chat_id, document=f, filename=f"{repo}.zip")
+                        await status_msg.delete()
+                        
+                    elif choice == "file":
+                        filename_only = os.path.basename(path)
+                        await status_msg.edit_text(f"📥 *Downloading File:* `{filename_only}`...")
+                        dest_file = os.path.join(temp_dir, filename_only)
+                        
+                        if platform == "github":
+                            ref_branch = branch or "main"
+                            dl_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+                            headers = {"Accept": "application/vnd.github.v3.raw"}
+                            if token:
+                                headers["Authorization"] = f"token {token}"
+                            params = {"ref": ref_branch}
+                        else:
+                            import urllib.parse
+                            project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+                            enc_path = urllib.parse.quote_plus(path)
+                            dl_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/files/{enc_path}/raw"
+                            headers = {"PRIVATE-TOKEN": token} if token else {}
+                            params = {"ref": branch} if branch else {}
+                            
+                        async with aiohttp.ClientSession(headers=headers) as session:
+                            async with session.get(dl_url, params=params) as resp:
+                                if resp.status != 200:
+                                    await status_msg.edit_text(f"❌ Failed to download file: HTTP {resp.status}")
+                                    return
+                                with open(dest_file, "wb") as f:
+                                    f.write(await resp.read())
+                                    
+                        await status_msg.edit_text("📤 *Uploading File...*")
+                        file_size = os.path.getsize(dest_file)
+                        db.log_download(user_id, "git_file", file_size)
+                        
+                        with open(dest_file, "rb") as f:
+                            await bot.send_document(chat_id=chat_id, document=f, filename=filename_only)
+                        await status_msg.delete()
+                        
+                    elif choice == "folder":
+                        folder_name = os.path.basename(path)
+                        await status_msg.edit_text(f"📥 *Downloading Folder contents:* `{folder_name}`...")
+                        local_folder_dir = os.path.join(temp_dir, folder_name)
+                        os.makedirs(local_folder_dir, exist_ok=True)
+                        
+                        async with aiohttp.ClientSession() as session:
+                            if platform == "github":
+                                await download_github_folder_recursive(
+                                    session, owner, repo, path, branch, local_folder_dir, token
+                                )
+                            else:
+                                await download_gitlab_folder_recursive(
+                                    session, owner, repo, path, branch, local_folder_dir, token
+                                )
+                                
+                        import shutil
+                        zip_output_path = os.path.join(temp_dir, folder_name)
+                        await status_msg.edit_text("📦 *Compressing folder...*")
+                        shutil.make_archive(zip_output_path, 'zip', local_folder_dir)
+                        final_zip = zip_output_path + ".zip"
+                        
+                        await status_msg.edit_text("📤 *Uploading Folder ZIP...*")
+                        file_size = os.path.getsize(final_zip)
+                        db.log_download(user_id, "git_folder", file_size)
+                        
+                        with open(final_zip, "rb") as f:
+                            await bot.send_document(chat_id=chat_id, document=f, filename=f"{folder_name}.zip")
+                        await status_msg.delete()
+                        
+            except Exception as e:
+                logger.error(f"Git download failed: {e}")
+                await query.message.reply_text(f"❌ *Git download failed:* `{str(e)[:150]}`")
+                
+        await download_queue.put(git_dl_task)
+        return
+
+    if action == "git_asset_dl":
+        asset_url_id = data[1]
+        cached = URL_CACHE.get(asset_url_id)
+        if not cached:
+            await query.answer("❌ Download expired.")
+            return
+            
+        await query.answer("⏳ Downloading release asset...")
+        
+        async def asset_task():
+            try:
+                bot = query.message.get_bot()
+                chat_id = query.message.chat_id
+                status = await query.message.reply_text("📥 *Downloading release asset...*")
+                
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    filepath = os.path.join(temp_dir, cached['title'])
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(cached['url']) as resp:
+                            if resp.status == 200:
+                                with open(filepath, "wb") as f:
+                                    f.write(await resp.read())
+                    
+                    await status.edit_text("📤 *Uploading release asset...*")
+                    with open(filepath, "rb") as f:
+                        await bot.send_document(chat_id=chat_id, document=f, filename=cached['title'])
+                    await status.delete()
+            except Exception as e:
+                logger.error(f"Release asset download failed: {e}")
+                await bot.send_message(chat_id=chat_id, text=f"❌ Failed to download release asset: {e}")
+                
+        await download_queue.put(asset_task)
+        return
+
+    if action == "gitdl_cancel":
+        await query.delete_message()
+        return
 
     # Handle Converter Guides & Active Mode Actions
     if action == "conv_guide":
@@ -2659,6 +3201,8 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("phsearch", phsearch_command))
+    application.add_handler(CommandHandler("github_token", github_token_command))
+    application.add_handler(CommandHandler("gitlab_token", gitlab_token_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
