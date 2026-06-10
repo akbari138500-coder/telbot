@@ -820,9 +820,21 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         ydl_opts['download_ranges'] = lambda info, ydl: [{'start_time': _st, 'end_time': _et}]
         ydl_opts['force_keyframes_at_cuts'] = True
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except Exception as e:
+        if "impersonate" in ydl_opts:
+            logger.warning("Download failed with impersonate, retrying without...")
+            del ydl_opts["impersonate"]
+            # Reset standard http headers
+            ydl_opts["http_headers"] = base_headers
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+        else:
+            raise e
 
         if audio_only:
             base, _ = os.path.splitext(filename)
@@ -2243,8 +2255,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(url, download=False)
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        return ydl.extract_info(url, download=False)
+                except Exception as e:
+                    if "impersonate" in ydl_opts:
+                        logger.warning("Metadata extraction failed with impersonate, retrying without...")
+                        del ydl_opts["impersonate"]
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            return ydl.extract_info(url, download=False)
+                    raise e
             
             info = await loop.run_in_executor(None, extract_metadata)
             
@@ -2316,7 +2336,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             err_str = str(e)
 
             # Detect YouTube/PornHub bot detection blocking
-            if isinstance(e, AssertionError) or "assertion" in err_str.lower():
+            if (isinstance(e, AssertionError) or "assertion" in err_str.lower()) and "cookie" in err_str.lower():
                 await status_msg.edit_text(
                     "⚠️ *Cookie Format Error / خطای فرمت کوکی*\n\n"
                     "🍪 The uploaded `cookies.txt` contains formatting errors (invalid Netscape format) which causes `yt-dlp` to crash.\n\n"
@@ -3577,7 +3597,7 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
             logger.error(f"Task failed: {e}", exc_info=True)
             err_msg = str(e)
             try:
-                if isinstance(e, AssertionError) or "assertion" in err_msg.lower():
+                if (isinstance(e, AssertionError) or "assertion" in err_msg.lower()) and "cookie" in err_msg.lower():
                     await status_msg.edit_text(
                         f"❌ *Cookie Format Error / خطای فرمت کوکی*\n\n"
                         f"The uploaded `cookies.txt` file contains formatting errors (invalid Netscape format), "
