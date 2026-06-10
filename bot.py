@@ -40,11 +40,18 @@ logger = logging.getLogger(__name__)
 # Constants
 MAX_PART_SIZE = 48 * 1024 * 1024  # 48MB hard limit (Telegram rejects at 50MB)
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")  # Path to cookies.txt for bot detection bypass
 
 # State Cache & Databases
 URL_CACHE = {}          # Store media details (uuid -> data)
 USER_STATES = {}        # User states (user_id -> {'state': '...', 'url_id': '...'})
 download_queue: asyncio.Queue = asyncio.Queue()  # Global sequential task queue
+
+def get_ydl_cookie_opts() -> dict:
+    """Returns yt-dlp cookie options to bypass bot detection on YouTube/PornHub."""
+    if os.path.exists(COOKIES_FILE):
+        return {"cookiefile": COOKIES_FILE}
+    return {}
 
 # =====================================================================
 # Database Manager (SQLite)
@@ -431,7 +438,11 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "subtitleslangs": ["en", "fa"],
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
+        "extractor_args": {"youtube": {"skip": ["translated_subs"]}},
+        **get_ydl_cookie_opts(),  # Cookie injection for bot detection bypass
     }
 
     if merge_fmt and shutil.which("ffmpeg"):
@@ -1034,11 +1045,11 @@ def run_youtube_search(query, page=1):
     """Internal helper to execute YouTube search for a specific page (5 items per page)."""
     limit = page * 5
     ydl_opts = {
-        'format': 'best',
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': True,
+        **get_ydl_cookie_opts(),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
@@ -1859,7 +1870,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             def extract_metadata():
-                ydl_opts = {'quiet': True, 'no_warnings': True}
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    **get_ydl_cookie_opts(),
+                }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=False)
             
@@ -2084,8 +2099,21 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
         file_type = "document"
         
         # Check if this is a subtitle file and user is awaiting one
-        if filename.lower().endswith(".srt") and user_id in USER_STATES and USER_STATES[user_id]['state'] == 'AWAITING_SUBTITLE':
+        if filename.lower().endswith(".srt") and user_id in USER_STATES and USER_STATES[user_id].get('state') == 'AWAITING_SUBTITLE':
             await handle_subtitle_upload(update, context)
+            return
+
+        # Admin: save cookies.txt for bot detection bypass
+        if filename.lower() == "cookies.txt" and ADMIN_USER_ID and str(user_id) == str(ADMIN_USER_ID):
+            status = await message.reply_text("🍪 *Saving cookies.txt...*", parse_mode="Markdown")
+            tg_file = await context.bot.get_file(file_id)
+            await tg_file.download_to_drive(COOKIES_FILE)
+            file_sz = os.path.getsize(COOKIES_FILE)
+            await status.edit_text(
+                f"✅ *cookies.txt saved!*\n`{file_sz} bytes`\n\n"
+                "🔄 YouTube/PornHub will now use your cookies to bypass bot detection.",
+                parse_mode="Markdown"
+            )
             return
     elif message.photo:
         photo = message.photo[-1]
@@ -3289,6 +3317,39 @@ async def start_web_server():
     await site.start()
     logger.info(f"Web server started on port {port}")
 
+async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to manage cookies.txt for bot-detection bypass."""
+    user_id = update.effective_user.id
+    if ADMIN_USER_ID and str(user_id) != str(ADMIN_USER_ID):
+        await update.message.reply_text("❌ This command is only available to admins.")
+        return
+
+    if os.path.exists(COOKIES_FILE):
+        size = os.path.getsize(COOKIES_FILE)
+        mod_time = time.ctime(os.path.getmtime(COOKIES_FILE))
+        await update.message.reply_text(
+            f"🍪 *Cookies Status*\n\n"
+            f"✅ `cookies.txt` is **active**\n"
+            f"📦 Size: `{size} bytes`\n"
+            f"🕐 Last updated: `{mod_time}`\n\n"
+            f"To update: send a new `cookies.txt` file to the bot.",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            f"🍪 *Cookies Setup*\n\n"
+            f"❌ No `cookies.txt` found — bot detection is **active** on YouTube/PornHub.\n\n"
+            f"*To fix YouTube/PornHub bot detection:*\n"
+            f"1️⃣ Install browser extension: *Get cookies.txt LOCALLY*\n"
+            f"   (Chrome: https://chrome.google.com/webstore)\n"
+            f"2️⃣ Visit youtube.com while **logged in**\n"
+            f"3️⃣ Export cookies as `cookies.txt`\n"
+            f"4️⃣ Send the `cookies.txt` file **directly to this bot**\n\n"
+            f"📁 File will be saved as: `{COOKIES_FILE}`",
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+
 async def main_async(application):
     await start_web_server()
     task = asyncio.create_task(queue_worker(application.bot))
@@ -3327,6 +3388,7 @@ def main():
     application.add_handler(CommandHandler("github_token", github_token_command))
     application.add_handler(CommandHandler("gitlab_token", gitlab_token_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("cookies", cookies_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
     # Catch textual requests (including URLs)
