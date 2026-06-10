@@ -113,8 +113,86 @@ def get_ydl_cookie_opts() -> dict:
     """Returns yt-dlp cookie options to bypass bot detection on YouTube/PornHub."""
     opts = {}
     if os.path.exists(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
+        # Always sanitize before use to make sure it never crashes yt-dlp
+        sanitize_cookies_file(COOKIES_FILE)
+        try:
+            with open(COOKIES_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                first_line = f.readline().strip().lstrip('\ufeff')
+            if first_line.startswith("# Netscape"):
+                opts["cookiefile"] = COOKIES_FILE
+            else:
+                logger.warning(f"Cookies file does not start with Netscape header. Skipping to avoid yt-dlp crash.")
+        except Exception as e:
+            logger.error(f"Failed to read cookies file for validation: {e}")
     return opts
+
+def sanitize_cookies_file(filepath: str):
+    """Cleans a cookies.txt file to ensure valid Netscape format and LF line endings."""
+    if not os.path.exists(filepath):
+        return
+    try:
+        # Read the file contents safely
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            with open(filepath, "r", encoding="latin-1") as f:
+                content = f.read()
+
+        # Remove UTF-8 BOM if present
+        content = content.lstrip('\ufeff')
+
+        lines = content.splitlines()
+        cleaned_lines = []
+        has_header = False
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Keep comments, but normalize the Netscape header
+            if stripped.startswith("#"):
+                if "Netscape HTTP Cookie File" in stripped:
+                    if not has_header:
+                        cleaned_lines.append("# Netscape HTTP Cookie File")
+                        has_header = True
+                    continue
+                # Skip other comment headers to avoid issues, but keep other comments if they are not headers
+                if "spec.html" not in stripped and "Do not edit" not in stripped:
+                    cleaned_lines.append(stripped)
+                continue
+
+            # It's a cookie entry. Split by tab to verify
+            cols = stripped.split("\t")
+            if len(cols) >= 7:
+                cleaned_lines.append(stripped)
+            else:
+                # Try space separation if they copy-pasted with spaces
+                cols_space = stripped.split()
+                if len(cols_space) >= 7:
+                    # Reconstruct tab-separated line
+                    reconstructed = "\t".join(cols_space[:6] + [" ".join(cols_space[6:])])
+                    cleaned_lines.append(reconstructed)
+
+        # Ensure the file starts with the header
+        final_lines = []
+        if has_header or any(line.startswith("# Netscape") for line in cleaned_lines):
+            final_lines.append("# Netscape HTTP Cookie File")
+            final_lines.append("# This is a sanitized Netscape cookie file.")
+            final_lines.append("")
+
+        for line in cleaned_lines:
+            if "Netscape HTTP Cookie File" not in line:
+                final_lines.append(line)
+
+        # Write clean, LF-only file
+        with open(filepath, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(final_lines) + "\n")
+
+        logger.info(f"Successfully sanitized cookies file: {filepath}")
+    except Exception as e:
+        logger.error(f"Failed to sanitize cookies file: {e}")
 
 # ---------------------------------------------------------------------------
 # Cobalt API — residential-proxied downloader for datacenter-IP-blocked sites
