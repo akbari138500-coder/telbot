@@ -158,6 +158,9 @@ _IMPERSONATE_SITES = [
     r'tube8\.com',
     r'spankbang\.com',
     r'xnxx\.com',
+    r'youtube\.com',
+    r'youtu\.be',
+    r'ytsearch',
 ]
 
 def is_impersonate_site(url: str) -> bool:
@@ -195,6 +198,8 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
         cmd = ["yt-dlp", "--no-playlist", "--dump-json", "--no-download"]
         if is_impersonate_site(url):
             cmd += ["--impersonate", "chrome"]
+        if os.path.exists(COOKIES_FILE):
+            cmd += ["--cookies", COOKIES_FILE]
         cmd.append(url)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
@@ -1281,15 +1286,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_youtube_search(query, page=1):
     """Internal helper to execute YouTube search for a specific page (5 items per page)."""
     limit = page * 5
+    search_url = f"ytsearch{limit}:{query}"
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': True,
         **get_ydl_cookie_opts(),
+        **get_site_specific_opts(search_url),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+        info = ydl.extract_info(search_url, download=False)
         entries = info.get('entries', [])
         start_idx = (page - 1) * 5
         return entries[start_idx:start_idx + 5]
@@ -2027,15 +2034,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_running_loop()
         try:
             def search_yt_track():
+                search_query = f"ytsearch1:{track_artist} - {track_title}"
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
                     'noplaylist': True,
                     'extract_flat': True,
                     **get_ydl_cookie_opts(),
+                    **get_site_specific_opts(search_query),
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(f"ytsearch1:{track_artist} - {track_title}", download=False)
+                    info = ydl.extract_info(search_query, download=False)
                     entries = info.get('entries', [])
                     if entries:
                         entry = entries[0]
@@ -2113,6 +2122,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'quiet': True,
                     'no_warnings': True,
                     **get_ydl_cookie_opts(),
+                    **get_site_specific_opts(url),
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=False)
@@ -3427,7 +3437,13 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
             
             # Fetch playlist entries
             def get_playlist_entries():
-                ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True}
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': True,
+                    **get_ydl_cookie_opts(),
+                    **get_site_specific_opts(url),
+                }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=False)
             
