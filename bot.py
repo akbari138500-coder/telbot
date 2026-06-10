@@ -57,6 +57,13 @@ def _auto_update_ytdlp():
             env=clean_env,
             capture_output=True, text=True, timeout=60
         )
+        if result.returncode != 0:
+            # Fallback to --user if system-wide package is read-only (e.g. Docker/Render/Heroku)
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "--user", "--upgrade", "yt-dlp"],
+                env=clean_env,
+                capture_output=True, text=True, timeout=60
+            )
         if result.returncode == 0:
             import importlib
             importlib.reload(yt_dlp)
