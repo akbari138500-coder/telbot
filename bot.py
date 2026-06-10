@@ -176,11 +176,11 @@ def sanitize_cookies_file(filepath: str):
                     cleaned_lines.append(reconstructed)
 
         # Ensure the file starts with the header
-        final_lines = []
-        if has_header or any(line.startswith("# Netscape") for line in cleaned_lines):
-            final_lines.append("# Netscape HTTP Cookie File")
-            final_lines.append("# This is a sanitized Netscape cookie file.")
-            final_lines.append("")
+        final_lines = [
+            "# Netscape HTTP Cookie File",
+            "# This is a sanitized Netscape cookie file.",
+            ""
+        ]
 
         for line in cleaned_lines:
             if "Netscape HTTP Cookie File" not in line:
