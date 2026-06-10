@@ -143,6 +143,57 @@ async def bypass_url(url):
                 break
         return current_url
 
+async def fetch_spotify_metadata(url):
+    """Fetches track metadata from public Spotify page without API keys."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    # Extract Title
+                    title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+                    title = unquote(title_match.group(1)) if title_match else None
+                    
+                    # Extract Image
+                    image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+                    image = image_match.group(1) if image_match else None
+                    
+                    # Extract Description (contains Artist info)
+                    desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+                    desc = unquote(desc_match.group(1)) if desc_match else ""
+                    
+                    artist = "Unknown Artist"
+                    if " · " in desc:
+                        parts = desc.split(" · ")
+                        if parts[0].startswith("Song by "):
+                            artist = parts[0].replace("Song by ", "")
+                        elif len(parts) > 1 and "by " in parts[0]:
+                            artist = parts[0].split("by ")[-1]
+                    elif "by " in desc:
+                        artist = desc.split("by ")[-1]
+                        
+                    # Fallback to Title tag parsing
+                    if not title:
+                        h_title_match = re.search(r'<title>([^<]+)</title>', html)
+                        if h_title_match:
+                            h_title = h_title_match.group(1)
+                            if " | Spotify" in h_title:
+                                h_title = h_title.replace(" | Spotify", "")
+                            if " - song by " in h_title.lower():
+                                title, artist = re.split(r' - song by ', h_title, flags=re.IGNORECASE)
+                            else:
+                                title = h_title
+                                
+                    return {
+                        "title": (title or "Spotify Track").strip(),
+                        "artist": (artist or "Unknown Artist").strip(),
+                        "thumbnail": image
+                    }
+        except Exception as e:
+            logger.error(f"Spotify metadata fetch failed: {e}")
+    return None
+
 async def download_thumbnail(url, dest_dir):
     """Downloads video thumbnail in the background."""
     if not url:
@@ -541,8 +592,8 @@ async def run_file_conversion(input_path, target_format, temp_dir):
 # =====================================================================
 # Messaging & Telegram Upload Engine
 # =====================================================================
-async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thumbnail_path=None, as_gif=False, user_id=None):
-    """Sends documents, videos or GIFs to the user, handling auto-splitting."""
+async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thumbnail_path=None, as_gif=False, user_id=None, audio_title=None, audio_performer=None):
+    """Sends documents, videos, audios or GIFs to the user, handling auto-splitting and custom tags."""
     file_size = os.path.getsize(filepath)
     filename = os.path.basename(filepath)
     video_extensions = [".mp4", ".mkv", ".mov", ".avi", ".webm"]
@@ -582,7 +633,19 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
         try:
             thumb_file = open(thumbnail_path, "rb") if thumbnail_path and os.path.exists(thumbnail_path) else None
             sent_msg = None
-            if is_video:
+            
+            # Send as Native Audio if Spotify/Audio metadata is present
+            if audio_title and audio_performer and filepath.lower().endswith(".mp3"):
+                with open(filepath, "rb") as f:
+                    sent_msg = await bot.send_audio(
+                        chat_id=chat_id,
+                        audio=f,
+                        title=audio_title,
+                        performer=audio_performer,
+                        thumbnail=thumb_file,
+                        reply_to_message_id=reply_to_message_id
+                    )
+            elif is_video:
                 try:
                     with open(filepath, "rb") as f:
                         sent_msg = await bot.send_video(
@@ -919,6 +982,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Bypass redirects (Link Shorteners)
     status_msg = await message.reply_text("🔍 *Resolving link redirects... / در حال بررسی لینک*", parse_mode="Markdown")
     url = await bypass_url(raw_url)
+
+    # Check if URL is Spotify
+    is_spotify = "spotify.com/track/" in url.lower() or "spotify.link" in url.lower()
+    if is_spotify:
+        await status_msg.edit_text("🎵 *Extracting Spotify metadata... / دریافت اطلاعات اسپاتیفای*", parse_mode="Markdown")
+        meta = await fetch_spotify_metadata(url)
+        if not meta or not meta.get("title"):
+            await status_msg.edit_text("❌ *Failed to retrieve Spotify track metadata.*")
+            return
+            
+        track_title = meta["title"]
+        track_artist = meta["artist"]
+        track_thumb = meta["thumbnail"]
+        
+        await status_msg.edit_text(f"🔍 *Searching for:* `{track_artist} - {track_title}` on YouTube...", parse_mode="Markdown")
+        
+        # Search YouTube for the track
+        loop = asyncio.get_running_loop()
+        try:
+            def search_yt_track():
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'noplaylist': True,
+                    'extract_flat': True,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(f"ytsearch1:{track_artist} - {track_title}", download=False)
+                    entries = info.get('entries', [])
+                    if entries:
+                        return entries[0].get('url')
+                    return None
+            
+            yt_url = await loop.run_in_executor(None, search_yt_track)
+            if not yt_url:
+                await status_msg.edit_text("❌ *Song not found on YouTube search.*")
+                return
+                
+            # Add to Queue as MP3 download!
+            await status_msg.delete()
+            await add_to_queue(
+                url=yt_url,
+                message_to_reply=message,
+                format_opt="audio",
+                custom_name=f"{track_artist} - {track_title}",
+                cached_title=f"{track_artist} - {track_title}",
+                cached_thumb=track_thumb,
+                user_id=user_id,
+                audio_title=track_title,
+                audio_performer=track_artist
+            )
+            return
+        except Exception as e:
+            logger.error(f"Spotify YouTube search failed: {e}")
+            await status_msg.edit_text(f"❌ *Error search-matching song:* `{str(e)[:150]}`")
+            return
 
     # Check if we should use yt-dlp to download (e.g. streaming format or video platform)
     direct_file_extensions = (
@@ -1287,7 +1407,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================================
 # Queue Execution System
 # =====================================================================
-async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_time=None, end_time=None, as_gif=False, cached_title=None, cached_thumb=None, user_id=None):
+async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_time=None, end_time=None, as_gif=False, cached_title=None, cached_thumb=None, user_id=None, audio_title=None, audio_performer=None):
     """Enqueues single download task."""
     chat_id = message_to_reply.chat.id
     status_msg = await message_to_reply.reply_text("⏳ *Calculating position in queue...*", parse_mode="Markdown")
@@ -1325,7 +1445,9 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                         reply_to_message_id=message_to_reply.message_id,
                         thumbnail_path=thumbnail_path,
                         as_gif=as_gif,
-                        user_id=user_id
+                        user_id=user_id,
+                        audio_title=audio_title,
+                        audio_performer=audio_performer
                     )
                     await status_msg.delete()
                 else:
