@@ -6,3 +6,5 @@ python-dotenv
 Pillow
 pypdf
 docx2pdf
+mutagen
+

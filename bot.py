@@ -373,6 +373,9 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }] if shutil.which("ffmpeg") else []
+    elif format_opt in ("1080p", "720p", "480p", "360p"):
+        res = format_opt[:-1]
+        ydl_format = f"bestvideo[height<={res}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={res}]+bestaudio/best[height<={res}]/best"
 
     ydl_opts = {
         "outtmpl": os.path.join(dest_dir, "%(title)s.%(ext)s"),
@@ -520,7 +523,6 @@ async def run_file_conversion(input_path, target_format, temp_dir):
         cmd = ["ffmpeg", "-y", "-i", input_path]
         
         if target_format == "ogg":
-            # Convert to Vorbis for OGG audio compatibility
             cmd.extend(["-c:a", "libvorbis", "-q:a", "4"])
         elif target_format == "mp3":
             cmd.extend(["-codec:a", "libmp3lame", "-b:a", "192k"])
@@ -537,6 +539,112 @@ async def run_file_conversion(input_path, target_format, temp_dir):
             
         return await loop.run_in_executor(None, process_audio)
         
+    elif target_format == "compress":
+        # Video Compression using FFmpeg (libx264, medium speed, crf 28, aac 128k audio)
+        output_path = os.path.join(temp_dir, "compressed_" + name_part + ".mp4")
+        if not shutil.which("ffmpeg"):
+            raise Exception("FFmpeg is not installed on this server. Video compression is unavailable.")
+        
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", "scale='min(1280,iw)':-2",
+            "-vcodec", "libx264", "-crf", "28", "-preset", "fast",
+            "-acodec", "aac", "-b:a", "128k",
+            output_path
+        ]
+        
+        loop = asyncio.get_running_loop()
+        def process_compress():
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return output_path
+        return await loop.run_in_executor(None, process_compress)
+
+    elif target_format.startswith("vfx_"):
+        # Voice Effects using FFmpeg filters
+        effect = target_format.split("_")[1]
+        output_path = os.path.join(temp_dir, f"vfx_{effect}_" + name_part + ".mp3")
+        if not shutil.which("ffmpeg"):
+            raise Exception("FFmpeg is not installed on this server.")
+            
+        filters = {
+            "alien": "asetrate=44100*0.6,atempo=1.66,vibrato=f=12:d=0.7",
+            "chipmunk": "asetrate=44100*1.4,atempo=0.7",
+            "robot": "aecho=0.8:0.88:6:0.4,asetrate=44100*0.9,atempo=1.1",
+            "echo": "aecho=0.8:0.9:1000:0.3"
+        }
+        filter_str = filters.get(effect, "aecho=0.8:0.88:6:0.4")
+        cmd = ["ffmpeg", "-y", "-i", input_path, "-af", filter_str, output_path]
+        
+        loop = asyncio.get_running_loop()
+        def process_vfx():
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return output_path
+        return await loop.run_in_executor(None, process_vfx)
+
+    elif target_format.startswith("tags:"):
+        # Music Tag Editor using Mutagen EasyID3
+        parts = target_format.split(":")
+        artist = parts[1]
+        title = parts[2]
+        album = parts[3]
+        output_path = os.path.join(temp_dir, "tagged_" + name_part + ".mp3")
+        shutil.copy(input_path, output_path)
+        
+        loop = asyncio.get_running_loop()
+        def process_tags():
+            from mutagen.easyid3 import EasyID3
+            try:
+                audio = EasyID3(output_path)
+            except Exception:
+                from mutagen.mp3 import MP3
+                audio_mp3 = MP3(output_path)
+                audio_mp3.add_tags()
+                audio_mp3.save()
+                audio = EasyID3(output_path)
+            audio['artist'] = artist
+            audio['title'] = title
+            audio['album'] = album
+            audio.save()
+            return output_path
+        return await loop.run_in_executor(None, process_tags)
+
+    elif target_format.startswith("pdfprotect:"):
+        # Protect PDF using password
+        password = target_format.split(":", 1)[1]
+        output_path = os.path.join(temp_dir, "protected_" + name_part + ".pdf")
+        
+        loop = asyncio.get_running_loop()
+        def process_protect():
+            from pypdf import PdfReader, PdfWriter
+            reader = PdfReader(input_path)
+            writer = PdfWriter()
+            for page in reader.pages:
+                writer.add_page(page)
+            writer.encrypt(user_password=password, owner_password=None, use_128bit=True)
+            with open(output_path, "wb") as f:
+                writer.write(f)
+            return output_path
+        return await loop.run_in_executor(None, process_protect)
+
+    elif target_format.startswith("pdfunlock:"):
+        # Unlock PDF using password
+        password = target_format.split(":", 1)[1]
+        output_path = os.path.join(temp_dir, "unlocked_" + name_part + ".pdf")
+        
+        loop = asyncio.get_running_loop()
+        def process_unlock():
+            from pypdf import PdfReader, PdfWriter
+            reader = PdfReader(input_path)
+            if reader.is_encrypted:
+                reader.decrypt(password)
+            writer = PdfWriter()
+            for page in reader.pages:
+                writer.add_page(page)
+            with open(output_path, "wb") as f:
+                writer.write(f)
+            return output_path
+        return await loop.run_in_executor(None, process_unlock)
+
     elif target_format == "txt":
         # Extract Text from PDF using pypdf
         output_path = os.path.join(temp_dir, name_part + ".txt")
@@ -567,12 +675,10 @@ async def run_file_conversion(input_path, target_format, temp_dir):
         
         def process_docx():
             if os.name == 'nt':
-                # Windows (Microsoft Word COM)
                 from docx2pdf import convert
                 convert(input_path, output_path)
                 return output_path
             else:
-                # Linux (LibreOffice)
                 if shutil.which("libreoffice") or shutil.which("soffice"):
                     cmd_lo = [
                         shutil.which("libreoffice") or shutil.which("soffice"),
@@ -586,6 +692,12 @@ async def run_file_conversion(input_path, target_format, temp_dir):
                 raise Exception("Word conversion failed. LibreOffice/MS Word is not installed on this server.")
                 
         return await loop.run_in_executor(None, process_docx)
+        
+    elif target_format == "gif":
+        output_path = os.path.join(temp_dir, name_part + ".gif")
+        if convert_to_gif_ffmpeg(input_path, output_path):
+            return output_path
+        raise Exception("GIF conversion failed.")
         
     return None
 
@@ -826,41 +938,43 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Searches YouTube and returns top 5 results with inline select buttons."""
-    query = " ".join(context.args)
-    if not query:
-        await update.message.reply_text("❌ Please specify query: `/search coldplay`")
-        return
+def run_youtube_search(query, page=1):
+    """Internal helper to execute YouTube search for a specific page (5 items per page)."""
+    limit = page * 5
+    ydl_opts = {
+        'format': 'best',
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'extract_flat': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+        entries = info.get('entries', [])
+        start_idx = (page - 1) * 5
+        return entries[start_idx:start_idx + 5]
 
-    status_msg = await update.message.reply_text("🔍 *Searching YouTube... / در حال جستجو*", parse_mode="Markdown")
+async def render_search_page(message, query, page, query_uuid, edit=False):
+    """Renders search results page with 5 downloads and next/prev buttons."""
     loop = asyncio.get_running_loop()
-    
     try:
-        def run_search():
-            ydl_opts = {
-                'format': 'best',
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'extract_flat': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch5:{query}", download=False)
-                return info.get('entries', [])
-
-        entries = await loop.run_in_executor(None, run_search)
+        entries = await loop.run_in_executor(None, lambda: run_youtube_search(query, page))
         if not entries:
-            await status_msg.edit_text("❌ No results found.")
+            if edit:
+                await message.edit_text("❌ No more results found.")
+            else:
+                await message.reply_text("❌ No results found.")
             return
 
-        text = f"🔍 *YOUTUBE SEARCH / جستجوی یوتیوب*\n{DIVIDER}\nQuery: `{query}`\n\n"
+        text = f"🔍 *YOUTUBE SEARCH / جستجوی یوتیوب*\n{DIVIDER}\nQuery: `{query}`\nPage: `{page}`\n\n"
         keyboard = []
+        download_buttons = []
         
         for idx, entry in enumerate(entries):
+            global_idx = (page - 1) * 5 + idx + 1
             title = entry.get('title', 'Video')
             url = entry.get('url')
-            text += f"{idx + 1}️⃣ *{title[:50]}...*\n      └─ 🔗 {url}\n\n"
+            text += f"{global_idx}️⃣ *{title[:50]}...*\n      └─ 🔗 {url}\n\n"
             
             url_id = uuid.uuid4().hex[:8]
             URL_CACHE[url_id] = {
@@ -869,17 +983,45 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'thumbnail': entry.get('thumbnail'),
                 'duration': entry.get('duration', 0)
             }
-            # Balanced 2-buttons per row layout
-            if idx % 2 == 0:
-                keyboard.append([InlineKeyboardButton(f"📥 Download #{idx + 1}", callback_data=f"opt:{url_id}")])
-            else:
-                keyboard[-1].append(InlineKeyboardButton(f"📥 Download #{idx + 1}", callback_data=f"opt:{url_id}"))
+            download_buttons.append(InlineKeyboardButton(f"📥 #{global_idx}", callback_data=f"opt:{url_id}"))
 
-        await status_msg.delete()
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        # Add downloads to keyboard
+        keyboard.append(download_buttons[:3])
+        if len(download_buttons) > 3:
+            keyboard.append(download_buttons[3:])
+
+        # Add pagination buttons
+        pagination_row = []
+        if page > 1:
+            pagination_row.append(InlineKeyboardButton("◀️ Prev (قبلی)", callback_data=f"src:{page - 1}:{query_uuid}"))
+        pagination_row.append(InlineKeyboardButton("▶️ Next (بعدی)", callback_data=f"src:{page + 1}:{query_uuid}"))
+        keyboard.append(pagination_row)
+
+        if edit:
+            await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        else:
+            await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Search failed: {e}")
-        await status_msg.edit_text(f"❌ *Search failed:* `{str(e)[:150]}`")
+        err_msg = f"❌ *Search failed:* `{str(e)[:150]}`"
+        if edit:
+            await message.edit_text(err_msg, parse_mode="Markdown")
+        else:
+            await message.reply_text(err_msg, parse_mode="Markdown")
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Searches YouTube and returns top 5 results with inline select buttons and pagination."""
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text("❌ Please specify query: `/search coldplay`")
+        return
+
+    status_msg = await update.message.reply_text("🔍 *Searching YouTube... / در حال جستجو*", parse_mode="Markdown")
+    query_uuid = uuid.uuid4().hex[:8]
+    URL_CACHE[query_uuid] = {"query": query}
+    
+    await status_msg.delete()
+    await render_search_page(update.message, query, 1, query_uuid, edit=False)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays personal statistics, or global statistics if requested by Admin."""
@@ -918,6 +1060,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     text = message.text.strip()
+
+    # Check for text state inputs
+    if user_id in USER_STATES:
+        state_info = USER_STATES[user_id]
+        state = state_info.get('state')
+        
+        if state == 'AWAITING_PDF_PROTECT_PASS':
+            password = text
+            file_uuid = state_info['file_uuid']
+            cached = URL_CACHE.get(file_uuid)
+            USER_STATES.pop(user_id, None) # Clear state
+            
+            if not cached:
+                await message.reply_text("❌ Session expired. Please send file again.")
+                return
+            
+            # Enqueue protect conversion
+            await message.reply_text("⏳ *Adding PDF Protect task to queue...*")
+            await add_conversion_to_queue(cached['file_id'], cached['filename'], f"pdfprotect:{password}", message, user_id)
+            URL_CACHE.pop(file_uuid, None)
+            return
+
+        elif state == 'AWAITING_PDF_UNLOCK_PASS':
+            password = text
+            file_uuid = state_info['file_uuid']
+            cached = URL_CACHE.get(file_uuid)
+            USER_STATES.pop(user_id, None) # Clear state
+            
+            if not cached:
+                await message.reply_text("❌ Session expired. Please send file again.")
+                return
+            
+            # Enqueue unlock conversion
+            await message.reply_text("⏳ *Adding PDF Unlock task to queue...*")
+            await add_conversion_to_queue(cached['file_id'], cached['filename'], f"pdfunlock:{password}", message, user_id)
+            URL_CACHE.pop(file_uuid, None)
+            return
+
+        elif state == 'AWAITING_TAG_EDIT':
+            # Format: Artist - Title - Album
+            parts = [p.strip() for p in text.split("-")]
+            artist = parts[0] if len(parts) > 0 else "Unknown"
+            title = parts[1] if len(parts) > 1 else "Unknown"
+            album = parts[2] if len(parts) > 2 else "Unknown"
+            
+            file_uuid = state_info['audio_file_uuid']
+            cached = URL_CACHE.get(file_uuid)
+            USER_STATES.pop(user_id, None) # Clear state
+            
+            if not cached:
+                await message.reply_text("❌ Session expired. Please send file again.")
+                return
+            
+            # Enqueue tag edit
+            await message.reply_text("⏳ *Adding music tag editor task to queue...*")
+            await add_conversion_to_queue(cached['file_id'], cached['filename'], f"tags:{artist}:{title}:{album}", message, user_id)
+            URL_CACHE.pop(file_uuid, None)
+            return
 
     # Handle Bottom Menu Buttons
     if text == "🔍 YouTube Search":
@@ -1088,7 +1288,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "youtube.com", "youtu.be", "instagram.com", "tiktok.com",
         "twitter.com", "x.com", "facebook.com", "fb.watch", "vimeo.com",
         "pornhub.com", "xvideos.com", "xnxx.com", "twitch.tv", "dailymotion.com",
-        "soundcloud.com", "spankbang.com", "redtube.com", "youporn.com", "tube8.com"
+        "soundcloud.com", "spankbang.com", "redtube.com", "youporn.com", "tube8.com",
+        "pinterest.com", "pin.it"
     ]
     is_media_domain = any(domain in parsed.netloc.lower() for domain in media_domains)
     
@@ -1152,9 +1353,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [
                 [
                     InlineKeyboardButton("🎥 Video (ویدیو)", callback_data=f"dl:{url_id}:video"),
-                    InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dl:{url_id}:audio")
+                    InlineKeyboardButton("⚙️ Resolution (کیفیت)", callback_data=f"resopts:{url_id}")
                 ],
                 [
+                    InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dl:{url_id}:audio"),
                     InlineKeyboardButton("✂️ Trim Range (برش)", callback_data=f"dl:{url_id}:trim"),
                 ],
                 [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
@@ -1183,14 +1385,102 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.delete()
         await add_to_queue(url, message, None, custom_name, user_id=user_id)
 
+async def handle_subtitle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    message = update.message
+    state_info = USER_STATES.get(user_id)
+    if not state_info or state_info.get('state') != 'AWAITING_SUBTITLE':
+        return
+
+    file_uuid = state_info['video_file_uuid']
+    cached = URL_CACHE.get(file_uuid)
+    if not cached:
+        await message.reply_text("❌ Video conversion session expired.")
+        USER_STATES.pop(user_id, None)
+        return
+
+    # Reset state
+    USER_STATES.pop(user_id, None)
+
+    # Download subtitle file
+    srt_file_id = message.document.file_id
+    srt_filename = message.document.file_name or "sub.srt"
+
+    # Enqueue the subtitle hardcoding task
+    await add_subtitle_conversion_to_queue(cached['file_id'], cached['filename'], srt_file_id, srt_filename, message, user_id)
+
+async def add_subtitle_conversion_to_queue(video_file_id, video_filename, srt_file_id, srt_filename, message_to_reply, user_id):
+    chat_id = message_to_reply.chat.id
+    status_msg = await message_to_reply.reply_text("⏳ *Calculating position in queue...*", parse_mode="Markdown")
+    
+    async def subtitle_task():
+        try:
+            await status_msg.edit_text("🚀 *Burning subtitles started...*", parse_mode="Markdown")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                bot = status_msg.get_bot()
+                
+                # Download video
+                await status_msg.edit_text("📥 *Downloading video from Telegram...*", parse_mode="Markdown")
+                video_file = await bot.get_file(video_file_id)
+                video_path = os.path.join(temp_dir, "input.mp4")
+                await video_file.download_to_drive(video_path)
+                
+                # Download subtitle
+                await status_msg.edit_text("📥 *Downloading subtitle file...*", parse_mode="Markdown")
+                srt_file = await bot.get_file(srt_file_id)
+                srt_path = os.path.join(temp_dir, "sub.srt")
+                await srt_file.download_to_drive(srt_path)
+                
+                # Burn subtitles using FFmpeg
+                await status_msg.edit_text("🎬 *Hardcoding subtitles (encoding)... / در حال چسباندن زیرنویس*", parse_mode="Markdown")
+                output_path = os.path.join(temp_dir, "subbed_video.mp4")
+                
+                cmd = [
+                    "ffmpeg", "-y", "-i", "input.mp4",
+                    "-vf", "subtitles=sub.srt",
+                    "-c:v", "libx264", "-crf", "28", "-preset", "fast",
+                    "-c:a", "copy",
+                    "subbed_video.mp4"
+                ]
+                
+                loop = asyncio.get_running_loop()
+                def run_ffmpeg():
+                    subprocess.run(cmd, cwd=temp_dir, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    return output_path
+                
+                await loop.run_in_executor(None, run_ffmpeg)
+                
+                if os.path.exists(output_path):
+                    await status_msg.edit_text("📤 *Uploading video with subtitles...*", parse_mode="Markdown")
+                    file_size = os.path.getsize(output_path)
+                    db.log_download(user_id, "video_subbed", file_size)
+                    
+                    reply_id = message_to_reply.message_id
+                    with open(output_path, "rb") as f:
+                        await bot.send_video(
+                            chat_id=chat_id,
+                            video=f,
+                            reply_to_message_id=reply_id
+                        )
+                    await status_msg.delete()
+                else:
+                    await status_msg.edit_text("❌ *Subtitling failed.* Could not build output file.")
+        except Exception as e:
+            logger.error(f"Subtitle burn failed: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ *Subtitle burn failed:* `{str(e)[:150]}`", parse_mode="Markdown")
+            
+    await download_queue.put(subtitle_task)
+
 # =====================================================================
 # File Receiver & Processing Handler (File Converter Entrypoint)
 # =====================================================================
 async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catches document, photo, or audio attachments and offers conversion choices."""
+    """Catches document, photo, video, or audio attachments and offers conversion choices."""
     message = update.message
     if not message:
         return
+
+    user_id = update.effective_user.id
 
     # Identify file details
     file_id = None
@@ -1201,8 +1491,12 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
         file_id = message.document.file_id
         filename = message.document.file_name or f"document_{message.document.file_id[:8]}"
         file_type = "document"
+        
+        # Check if this is a subtitle file and user is awaiting one
+        if filename.lower().endswith(".srt") and user_id in USER_STATES and USER_STATES[user_id]['state'] == 'AWAITING_SUBTITLE':
+            await handle_subtitle_upload(update, context)
+            return
     elif message.photo:
-        # Choose the highest resolution photo
         photo = message.photo[-1]
         file_id = photo.file_id
         filename = f"photo_{photo.file_id[:8]}.jpg"
@@ -1215,6 +1509,10 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
         file_id = message.voice.file_id
         filename = f"voice_{message.voice.file_id[:8]}.ogg"
         file_type = "audio"
+    elif message.video:
+        file_id = message.video.file_id
+        filename = message.video.file_name or f"video_{message.video.file_id[:8]}.mp4"
+        file_type = "video"
 
     if not file_id:
         return
@@ -1223,11 +1521,14 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
     _, ext = os.path.splitext(filename.lower())
     image_exts = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"]
     audio_exts = [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma"]
+    video_exts = [".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm"]
 
     if ext in image_exts:
         file_type = "image"
     elif ext in audio_exts:
         file_type = "audio"
+    elif ext in video_exts:
+        file_type = "video"
     elif ext == ".pdf":
         file_type = "pdf"
     elif ext == ".docx":
@@ -1254,6 +1555,9 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
                 InlineKeyboardButton("🖼 To WebP", callback_data=f"conv:{file_uuid}:webp"),
                 InlineKeyboardButton("📄 To PDF", callback_data=f"conv:{file_uuid}:pdf"),
             ],
+            [
+                InlineKeyboardButton("📁 Add to PDF Album", callback_data=f"conv:{file_uuid}:pdfalbum")
+            ]
         ]
     elif file_type == "audio":
         keyboard = [
@@ -1261,11 +1565,34 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
                 InlineKeyboardButton("🎵 To MP3", callback_data=f"conv:{file_uuid}:mp3"),
                 InlineKeyboardButton("🎵 To WAV", callback_data=f"conv:{file_uuid}:wav"),
             ],
-            [InlineKeyboardButton("🗣 To OGG Audio", callback_data=f"conv:{file_uuid}:ogg")],
+            [
+                InlineKeyboardButton("🗣 To OGG", callback_data=f"conv:{file_uuid}:ogg"),
+                InlineKeyboardButton("🏷 Edit Tags", callback_data=f"conv:{file_uuid}:tags")
+            ],
+            [
+                InlineKeyboardButton("🎭 Voice Effects", callback_data=f"conv:{file_uuid}:vfx")
+            ]
+        ]
+    elif file_type == "video":
+        keyboard = [
+            [
+                InlineKeyboardButton("📉 Compress (فشرده‌سازی)", callback_data=f"conv:{file_uuid}:compress"),
+                InlineKeyboardButton("🎵 Extract MP3 (استخراج صدا)", callback_data=f"conv:{file_uuid}:mp3")
+            ],
+            [
+                InlineKeyboardButton("💬 Add Subtitle (زیرنویس)", callback_data=f"conv:{file_uuid}:sub"),
+                InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"conv:{file_uuid}:gif")
+            ]
         ]
     elif file_type == "pdf":
         keyboard = [
-            [InlineKeyboardButton("📝 Extract Text (PDF to TXT)", callback_data=f"conv:{file_uuid}:txt")]
+            [
+                InlineKeyboardButton("📝 PDF to Text", callback_data=f"conv:{file_uuid}:txt"),
+                InlineKeyboardButton("🔒 Protect PDF", callback_data=f"conv:{file_uuid}:pdfprotect")
+            ],
+            [
+                InlineKeyboardButton("🔓 Unlock PDF", callback_data=f"conv:{file_uuid}:pdfunlock")
+            ]
         ]
     elif file_type == "docx":
         keyboard = [
@@ -1273,7 +1600,6 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
         ]
 
     if not keyboard:
-        # Unsupported format, send default response
         await message.reply_text(
             f"📥 *File Received:* `{filename}`\n\n❌ Format conversions are not supported for this file type.",
             parse_mode="Markdown",
@@ -1287,7 +1613,7 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
         f"{DIVIDER}\n"
         f"📁 *File Name:* `{filename}`\n"
         f"📦 *Type:* `{file_type.upper()}`\n\n"
-        f"👇 *Select target format:* / فرمت مورد نظر را انتخاب کنید:",
+        f"👇 *Select action:* / گزینه مورد نظر را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -1303,6 +1629,79 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split(":")
     action = data[0]
 
+    # Handle Search Pagination Page request
+    if action == "src":
+        page = int(data[1])
+        query_uuid = data[2]
+        cached_query = URL_CACHE.get(query_uuid)
+        if not cached_query:
+            await query.edit_message_text("❌ Search session expired. Please search again.")
+            return
+        
+        query_text = cached_query["query"]
+        await query.edit_message_text("🔍 *Loading search page... / در حال بارگذاری*", parse_mode="Markdown")
+        await render_search_page(query.message, query_text, page, query_uuid, edit=True)
+        return
+
+    # Handle Resolution Menu
+    if action == "resopts":
+        url_id = data[1]
+        cached = URL_CACHE.get(url_id)
+        if not cached:
+            await query.edit_message_text("❌ Session expired. Please send link again.")
+            return
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🎥 1080p (Full HD)", callback_data=f"resdl:{url_id}:1080p"),
+                InlineKeyboardButton("🎥 720p (HD)", callback_data=f"resdl:{url_id}:720p")
+            ],
+            [
+                InlineKeyboardButton("🎥 480p (Medium)", callback_data=f"resdl:{url_id}:480p"),
+                InlineKeyboardButton("🎥 360p (Low)", callback_data=f"resdl:{url_id}:360p")
+            ],
+            [
+                InlineKeyboardButton("◀️ Back (بازگشت)", callback_data=f"opt:{url_id}")
+            ]
+        ]
+        await query.edit_message_text(
+            f"⚙️ *Select Video Resolution / انتخاب کیفیت ویدیو* ⚙️\n\n"
+            f"🎥 *Media:* `{cached['title']}`\n\n"
+            f"👇 *Choose your resolution:*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return
+
+    # Handle Resolution Specific Download
+    if action == "resdl":
+        url_id = data[1]
+        resolution = data[2]
+        cached = URL_CACHE.get(url_id)
+        if not cached:
+            await query.edit_message_text("❌ Session expired. Please send link again.")
+            return
+
+        url = cached['url']
+        start_t = cached.get('start_time')
+        end_t = cached.get('end_time')
+        
+        await query.edit_message_text(f"⏳ *Adding video ({resolution}) to download queue...*", parse_mode="Markdown")
+        await add_to_queue(
+            url=url,
+            message_to_reply=query.message,
+            format_opt=resolution,
+            custom_name=None,
+            start_time=start_t,
+            end_time=end_t,
+            as_gif=False,
+            cached_title=cached['title'],
+            cached_thumb=cached['thumbnail'],
+            user_id=user_id
+        )
+        URL_CACHE.pop(url_id, None)
+        return
+
     # Handle Search Options Choice
     if action == "opt":
         url_id = data[1]
@@ -1314,9 +1713,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton("🎥 Video (ویدیو)", callback_data=f"dl:{url_id}:video"),
-                InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dl:{url_id}:audio")
+                InlineKeyboardButton("⚙️ Resolution (کیفیت)", callback_data=f"resopts:{url_id}")
             ],
             [
+                InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dl:{url_id}:audio"),
                 InlineKeyboardButton("✂️ Trim Range (برش)", callback_data=f"dl:{url_id}:trim"),
             ],
             [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
@@ -1431,9 +1831,179 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = cached["file_id"]
         filename = cached["filename"]
 
+        # Intercept interactive conversion actions:
+        if target_format == "sub":
+            USER_STATES[user_id] = {
+                'state': 'AWAITING_SUBTITLE',
+                'video_file_uuid': file_uuid
+            }
+            await query.edit_message_text(
+                "💬 *Add Subtitle / چسباندن زیرنویس* 💬\n\n"
+                "Please send/upload the `.srt` subtitle file now.\n"
+                "I will burn it into the video and send the final version back to you.",
+                parse_mode="Markdown"
+            )
+            return
+
+        if target_format == "tags":
+            USER_STATES[user_id] = {
+                'state': 'AWAITING_TAG_EDIT',
+                'audio_file_uuid': file_uuid
+            }
+            await query.edit_message_text(
+                "🏷 *Music Tag Editor / ویرایشگر تگ* 🏷\n\n"
+                "Please send the new metadata tags in the following format:\n"
+                "`Artist - Title - Album`\n\n"
+                "Example: `Coldplay - Yellow - Parachutes`",
+                parse_mode="Markdown"
+            )
+            return
+
+        if target_format == "vfx":
+            keyboard = [
+                [
+                    InlineKeyboardButton("👽 Alien", callback_data=f"vfxdl:{file_uuid}:alien"),
+                    InlineKeyboardButton("🐿 Chipmunk", callback_data=f"vfxdl:{file_uuid}:chipmunk")
+                ],
+                [
+                    InlineKeyboardButton("🤖 Robot", callback_data=f"vfxdl:{file_uuid}:robot"),
+                    InlineKeyboardButton("📻 Echo/Radio", callback_data=f"vfxdl:{file_uuid}:echo")
+                ],
+                [
+                    InlineKeyboardButton("◀️ Back", callback_data=f"conv:{file_uuid}:cancel")
+                ]
+            ]
+            await query.edit_message_text(
+                "🎭 *Voice & Audio Effects / افکت‌های صدا* 🎭\n\n"
+                "Choose an effect to apply to your audio file:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+
+        if target_format == "pdfalbum":
+            if user_id not in USER_STATES:
+                USER_STATES[user_id] = {}
+            if 'pdf_album' not in USER_STATES[user_id]:
+                USER_STATES[user_id]['pdf_album'] = []
+            USER_STATES[user_id]['pdf_album'].append(file_id)
+            album_size = len(USER_STATES[user_id]['pdf_album'])
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("📄 Generate PDF Album Now", callback_data=f"pdfalbum_build:{file_uuid}")
+                ],
+                [
+                    InlineKeyboardButton("➕ Add More Images", callback_data=f"conv:{file_uuid}:cancel")
+                ]
+            ]
+            await query.edit_message_text(
+                f"📁 *Image Added to PDF Album!* 📁\n\n"
+                f"Count of images currently: `{album_size}`\n\n"
+                f"Send another image to add to the album, or click below to build the PDF album now.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+
+        if target_format == "pdfprotect":
+            USER_STATES[user_id] = {
+                'state': 'AWAITING_PDF_PROTECT_PASS',
+                'file_uuid': file_uuid
+            }
+            await query.edit_message_text(
+                "🔒 *Protect PDF / رمزگذاری پی‌دی‌اف* 🔒\n\n"
+                "Please reply with the password you want to set for this PDF file:",
+                parse_mode="Markdown"
+            )
+            return
+
+        if target_format == "pdfunlock":
+            USER_STATES[user_id] = {
+                'state': 'AWAITING_PDF_UNLOCK_PASS',
+                'file_uuid': file_uuid
+            }
+            await query.edit_message_text(
+                "🔓 *Unlock PDF / رمزگشایی پی‌دی‌اف* 🔓\n\n"
+                "Please reply with the password of this PDF file to remove it:",
+                parse_mode="Markdown"
+            )
+            return
+
         await query.edit_message_text("⏳ *Adding conversion task to queue...*", parse_mode="Markdown")
         await add_conversion_to_queue(file_id, filename, target_format, query.message, user_id)
         URL_CACHE.pop(file_uuid, None)
+
+    # Voice Effects Callback
+    if action == "vfxdl":
+        file_uuid = data[1]
+        effect = data[2]
+        cached = URL_CACHE.get(file_uuid)
+        if not cached:
+            await query.edit_message_text("❌ Session expired.")
+            return
+        
+        file_id = cached["file_id"]
+        filename = cached["filename"]
+        target_format = f"vfx_{effect}"
+        await query.edit_message_text(f"⏳ *Adding voice filter ({effect}) task to queue...*", parse_mode="Markdown")
+        await add_conversion_to_queue(file_id, filename, target_format, query.message, user_id)
+        URL_CACHE.pop(file_uuid, None)
+        return
+
+    # PDF Album Generator Callback
+    if action == "pdfalbum_build":
+        file_uuid = data[1]
+        album = USER_STATES.get(user_id, {}).get('pdf_album', [])
+        if not album:
+            await query.edit_message_text("❌ No images in PDF album.")
+            return
+            
+        await query.edit_message_text("⏳ *Building and compiling PDF album...*", parse_mode="Markdown")
+        
+        async def pdf_album_task():
+            try:
+                status_msg = await query.message.reply_text("🚀 *PDF Album compilation started...*")
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    bot = query.message.get_bot()
+                    image_paths = []
+                    from PIL import Image
+                    
+                    for idx, img_file_id in enumerate(album):
+                        await status_msg.edit_text(f"📥 *Downloading image {idx+1}/{len(album)}...*")
+                        tg_file = await bot.get_file(img_file_id)
+                        img_path = os.path.join(temp_dir, f"img_{idx}.jpg")
+                        await tg_file.download_to_drive(img_path)
+                        image_paths.append(img_path)
+                    
+                    await status_msg.edit_text("📄 *Generating PDF...*")
+                    pdf_path = os.path.join(temp_dir, "album.pdf")
+                    opened_images = [Image.open(img_p).convert("RGB") for img_p in image_paths]
+                    
+                    if opened_images:
+                        opened_images[0].save(pdf_path, save_all=True, append_images=opened_images[1:])
+                        
+                        await status_msg.edit_text("📤 *Uploading PDF Album...*")
+                        with open(pdf_path, "rb") as f:
+                            await bot.send_document(
+                                chat_id=query.message.chat_id,
+                                document=f,
+                                filename="album.pdf",
+                                reply_to_message_id=query.message.reply_to_message.message_id if query.message.reply_to_message else None
+                            )
+                        await status_msg.delete()
+                    else:
+                        await status_msg.edit_text("❌ Failed to compile album: images could not be loaded.")
+            except Exception as e:
+                logger.error(f"PDF Album build failed: {e}")
+                await query.message.reply_text(f"❌ *Failed to build PDF album:* `{str(e)[:150]}`")
+                
+            if user_id in USER_STATES and 'pdf_album' in USER_STATES[user_id]:
+                USER_STATES[user_id].pop('pdf_album', None)
+        
+        await download_queue.put(pdf_album_task)
+        URL_CACHE.pop(file_uuid, None)
+        return
 
 # =====================================================================
 # Queue Execution System
@@ -1702,8 +2272,8 @@ def main():
     # Catch textual requests (including URLs)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Catch incoming file attachments (images, PDFs, documents, audio streams)
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.AUDIO | filters.VOICE, handle_incoming_file))
+    # Catch incoming file attachments (images, PDFs, documents, audio streams, videos)
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.AUDIO | filters.VOICE | filters.VIDEO, handle_incoming_file))
 
     if os.getenv("PORT"):
         logger.info("PORT environment variable detected. Running in cloud mode with Web Server...")
