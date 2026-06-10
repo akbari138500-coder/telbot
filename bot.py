@@ -916,6 +916,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f" ├─ *Media Links:* Send YouTube/Insta/TikTok links directly.\n"
         f" ├─ *Direct Links:* Send direct URLs (support `--name file.ext`).\n"
         f" ├─ *Search YouTube:* Use `/search <query>` to explore.\n"
+        f" ├─ *Search Pornhub:* Use `/phsearch <query>` to find adult media.\n"
         f" ├─ *Convert Formats:* Send any file, photo, or audio.\n"
         f" ├─ *Trimming:* Click '✂️ Trim' to download a video range.\n"
         f" ├─ *Playlists:* Download as multiple files or a single ZIP.\n"
@@ -925,13 +926,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             KeyboardButton("🔍 YouTube Search"),
-            KeyboardButton("🎵 Spotify Downloader")
+            KeyboardButton("🔞 Pornhub Search")
         ],
         [
-            KeyboardButton("🔄 File Converter"),
-            KeyboardButton("📊 Statistics")
+            KeyboardButton("🎵 Spotify Downloader"),
+            KeyboardButton("🔄 File Converter")
         ],
         [
+            KeyboardButton("📊 Statistics"),
             KeyboardButton("❓ Help & Guide")
         ]
     ]
@@ -1022,6 +1024,179 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await status_msg.delete()
     await render_search_page(update.message, query, 1, query_uuid, edit=False)
+
+async def run_pornhub_search(query, page=1):
+    import urllib.parse
+    url = f"https://www.pornhub.com/video/search?search={urllib.parse.quote(query)}&page={page}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.pornhub.com/'
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, timeout=12) as r:
+                if r.status != 200:
+                    logger.error(f"Pornhub search HTTP error: {r.status}")
+                    return []
+                html = await r.text()
+        except Exception as e:
+            logger.error(f"Pornhub search request failed: {e}")
+            return []
+            
+    vkeys = re.findall(r'data-video-vkey="([^"]+)"', html)
+    items = []
+    seen = set()
+    
+    for vk in vkeys:
+        if vk in seen:
+            continue
+        seen.add(vk)
+        
+        idx = html.find(f'data-video-vkey="{vk}"')
+        if idx == -1:
+            continue
+        sub = html[idx:idx+2500]
+        
+        title_match = re.search(r'title="([^"]+)"', sub)
+        title = title_match.group(1) if title_match else "Pornhub Video"
+        
+        thumb_match = re.search(r'data-mediabook="([^"]+)"', sub)
+        preview_url = thumb_match.group(1) if thumb_match else None
+        
+        img_match = re.search(r'data-medium-img="([^"]+)"', sub)
+        if not img_match:
+            img_match = re.search(r'data-thumb="([^"]+)"', sub)
+        if not img_match:
+            img_match = re.search(r'src="([^"]+)"', sub)
+        thumbnail_url = img_match.group(1) if img_match else ""
+        
+        duration_match = re.search(r'<var class="duration">([^<]+)</var>', sub)
+        if not duration_match:
+            duration_match = re.search(r'<span class="duration">([^<]+)</span>', sub)
+        duration = duration_match.group(1) if duration_match else "00:00"
+        
+        items.append({
+            'vkey': vk,
+            'title': title,
+            'thumbnail': thumbnail_url,
+            'preview_url': preview_url,
+            'duration': duration,
+            'url': f"https://www.pornhub.com/view_video.php?viewkey={vk}"
+        })
+        
+    return items
+
+async def render_phsearch_page(message, query, page, query_uuid, edit=False):
+    try:
+        ph_page = ((page - 1) // 4) + 1
+        slice_start = ((page - 1) % 4) * 5
+        slice_end = slice_start + 5
+        
+        raw_items = await run_pornhub_search(query, ph_page)
+        entries = raw_items[slice_start:slice_end]
+        
+        if not entries:
+            if edit:
+                await message.edit_text("❌ No more results found.")
+            else:
+                await message.reply_text("❌ No results found.")
+            return
+            
+        text = f"🔞 *PORNHUB SEARCH / جستجوی پورن‌هاب*\n{DIVIDER}\nQuery: `{query}`\nPage: `{page}`\n\n"
+        keyboard = []
+        
+        for idx, entry in enumerate(entries):
+            global_idx = (page - 1) * 5 + idx + 1
+            title = entry['title']
+            duration = entry['duration']
+            text += f"{global_idx}️⃣ *{title[:50]}...*\n      └─ ⏱ `{duration}`\n\n"
+            
+            url_id = uuid.uuid4().hex[:8]
+            dur_seconds = parse_time_str(duration) or 0
+            
+            URL_CACHE[url_id] = {
+                'url': entry['url'],
+                'title': title,
+                'thumbnail': entry['thumbnail'],
+                'preview_url': entry['preview_url'],
+                'duration': dur_seconds,
+                'is_ph': True
+            }
+            
+            row = [
+                InlineKeyboardButton(f"🎬 Preview #{global_idx}", callback_data=f"phprev:{url_id}"),
+                InlineKeyboardButton(f"📥 Download #{global_idx}", callback_data=f"opt:{url_id}")
+            ]
+            keyboard.append(row)
+            
+        pagination_row = []
+        if page > 1:
+            pagination_row.append(InlineKeyboardButton("◀️ Prev (قبلی)", callback_data=f"phsrc:{page - 1}:{query_uuid}"))
+        pagination_row.append(InlineKeyboardButton("▶️ Next (بعدی)", callback_data=f"phsrc:{page + 1}:{query_uuid}"))
+        keyboard.append(pagination_row)
+        
+        if edit:
+            await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        else:
+            await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Pornhub search rendering failed: {e}")
+        err_msg = f"❌ *Search failed:* `{str(e)[:150]}`"
+        if edit:
+            await message.edit_text(err_msg, parse_mode="Markdown")
+        else:
+            await message.reply_text(err_msg, parse_mode="Markdown")
+
+async def phsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Searches Pornhub and returns top results with preview and download options."""
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text("❌ Please specify query: `/phsearch milf`")
+        return
+        
+    status_msg = await update.message.reply_text("🔍 *Searching Pornhub... / در حال جستجو*", parse_mode="Markdown")
+    query_uuid = uuid.uuid4().hex[:8]
+    URL_CACHE[query_uuid] = {"query": query}
+    
+    await status_msg.delete()
+    await render_phsearch_page(update.message, query, 1, query_uuid, edit=False)
+
+async def send_ph_preview(bot, chat_id, preview_url, title, reply_to_message_id):
+    try:
+        await bot.send_video(
+            chat_id=chat_id,
+            video=preview_url,
+            caption=f"🎬 *Preview:* `{title}`",
+            parse_mode="Markdown",
+            reply_to_message_id=reply_to_message_id
+        )
+    except Exception as e:
+        logger.warning(f"Direct URL preview send failed, trying local download: {e}")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_file = os.path.join(temp_dir, "preview.mp4")
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+                async with aiohttp.ClientSession(headers=headers) as session:
+                    async with session.get(preview_url) as resp:
+                        if resp.status == 200:
+                            with open(temp_file, "wb") as f:
+                                f.write(await resp.read())
+                with open(temp_file, "rb") as f:
+                    await bot.send_video(
+                        chat_id=chat_id,
+                        video=f,
+                        caption=f"🎬 *Preview:* `{title}`",
+                        parse_mode="Markdown",
+                        reply_to_message_id=reply_to_message_id
+                    )
+        except Exception as ex:
+            logger.error(f"Failed to send preview locally: {ex}")
+            await bot.send_message(chat_id=chat_id, text="❌ Failed to load preview video.")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays personal statistics, or global statistics if requested by Admin."""
@@ -1122,6 +1297,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle Bottom Menu Buttons
     if text == "🔍 YouTube Search":
         await message.reply_text("🔎 *YouTube Search / جستجوی یوتیوب*\n\nType `/search <query>` to search for videos.\n\n*Example:* `/search coldplay`", parse_mode="Markdown")
+        return
+    elif text == "🔞 Pornhub Search":
+        await message.reply_text("🔞 *Pornhub Search / جستجوی پورن‌هاب*\n\nType `/phsearch <query>` to search for videos.\n\n*Example:* `/phsearch milf`", parse_mode="Markdown")
         return
     elif text == "🎵 Spotify Downloader":
         await message.reply_text("🎵 *Spotify Downloader / اسپاتیفای*\n\nSend any Spotify track link directly to the bot. I will automatically extract the song name, search for it, download it as MP3, and attach the original album art!\n\n*Example:* `https://open.spotify.com/track/4PTG3Z6ehGkBF3zI7YkR5C`", parse_mode="Markdown")
@@ -1641,6 +1819,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query_text = cached_query["query"]
         await query.edit_message_text("🔍 *Loading search page... / در حال بارگذاری*", parse_mode="Markdown")
         await render_search_page(query.message, query_text, page, query_uuid, edit=True)
+        return
+
+    # Handle Pornhub Search Pagination request
+    if action == "phsrc":
+        page = int(data[1])
+        query_uuid = data[2]
+        cached_query = URL_CACHE.get(query_uuid)
+        if not cached_query:
+            await query.edit_message_text("❌ Search session expired. Please search again.")
+            return
+            
+        query_text = cached_query["query"]
+        await query.edit_message_text("🔍 *Loading Pornhub search page... / در حال بارگذاری*", parse_mode="Markdown")
+        await render_phsearch_page(query.message, query_text, page, query_uuid, edit=True)
+        return
+
+    # Handle Pornhub video preview request
+    if action == "phprev":
+        url_id = data[1]
+        cached = URL_CACHE.get(url_id)
+        if not cached:
+            await query.edit_message_text("❌ Session expired.")
+            return
+            
+        preview_url = cached.get('preview_url')
+        title = cached.get('title', 'Pornhub Video')
+        
+        if not preview_url:
+            await query.edit_message_text("❌ No preview video found for this item.")
+            return
+            
+        await query.edit_message_text("⏳ *Loading and sending video preview... / ارسال پیش‌نمایش*", parse_mode="Markdown")
+        
+        async def preview_task():
+            bot = query.message.get_bot()
+            chat_id = query.message.chat_id
+            reply_id = query.message.message_id
+            await send_ph_preview(bot, chat_id, preview_url, title, reply_id)
+            
+        await download_queue.put(preview_task)
         return
 
     # Handle Resolution Menu
@@ -2266,6 +2484,7 @@ def main():
     # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("phsearch", phsearch_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
