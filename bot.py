@@ -22,13 +22,39 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-# Bypass Windows registry proxy settings if not explicitly defined in the environment
-if sys.platform.startswith('win'):
-    for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
-        if var not in os.environ:
-            os.environ[var] = ''
-    os.environ['NO_PROXY'] = '*'
-    os.environ['no_proxy'] = '*'
+# Proxy Check & Configuration
+def check_proxy_port(host="127.0.0.1", port=10808, timeout=1.0) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+def get_proxy_url() -> str | None:
+    if check_proxy_port("127.0.0.1", 10808):
+        return "http://127.0.0.1:10808"
+    return None
+
+# Configure V2Ray/Nekoray proxy globally if active
+if check_proxy_port("127.0.0.1", 10808):
+    PROXY_URL = "http://127.0.0.1:10808"
+    os.environ['http_proxy'] = PROXY_URL
+    os.environ['https_proxy'] = PROXY_URL
+    os.environ['all_proxy'] = PROXY_URL
+    os.environ['HTTP_PROXY'] = PROXY_URL
+    os.environ['HTTPS_PROXY'] = PROXY_URL
+    os.environ['ALL_PROXY'] = PROXY_URL
+    os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
+    os.environ['no_proxy'] = 'localhost,127.0.0.1'
+else:
+    # Bypass Windows registry proxy settings if not explicitly defined in the environment
+    if sys.platform.startswith('win'):
+        for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+            if var not in os.environ:
+                os.environ[var] = ''
+        os.environ['NO_PROXY'] = '*'
+        os.environ['no_proxy'] = '*'
 
 # Check if curl_cffi is installed to support browser impersonation targets
 try:
@@ -46,22 +72,24 @@ except ImportError:
 def _auto_update_ytdlp():
     """Silently upgrades yt-dlp at bot startup so extractors stay fresh."""
     try:
-        clean_env = os.environ.copy()
-        if sys.platform.startswith('win'):
-            for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
-                clean_env.pop(var, None)
-            clean_env['NO_PROXY'] = '*'
-            clean_env['no_proxy'] = '*'
+        proxy_url = get_proxy_url()
+        cmd = [sys.executable, "-m", "pip", "install", "-q"]
+        if proxy_url:
+            cmd += ["--proxy", proxy_url]
+        cmd += ["--upgrade", "yt-dlp"]
+        
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"],
-            env=clean_env,
+            cmd,
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
             # Fallback to --user if system-wide package is read-only (e.g. Docker/Render/Heroku)
+            cmd_user = [sys.executable, "-m", "pip", "install", "-q"]
+            if proxy_url:
+                cmd_user += ["--proxy", proxy_url]
+            cmd_user += ["--user", "--upgrade", "yt-dlp"]
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", "--user", "--upgrade", "yt-dlp"],
-                env=clean_env,
+                cmd_user,
                 capture_output=True, text=True, timeout=60
             )
         if result.returncode == 0:
@@ -217,6 +245,7 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
         "filenameStyle": "basic",
     }
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    proxy_url = get_proxy_url()
 
     async with aiohttp.ClientSession() as session:
         for instance in COBALT_API_INSTANCES:
@@ -225,7 +254,8 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
                     f"{instance}/",
                     json=payload,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30)
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    proxy=proxy_url
                 ) as resp:
                     if resp.status != 200:
                         continue
@@ -237,7 +267,7 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
                         dl_url = data["url"]
                         ext = ".mp4" if not audio_only else ".mp3"
                         fname = os.path.join(dest_dir, f"cobalt_download{ext}")
-                        async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=120)) as dresp:
+                        async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=120), proxy=proxy_url) as dresp:
                             if dresp.status == 200:
                                 with open(fname, "wb") as f:
                                     async for chunk in dresp.content.iter_chunked(512 * 1024):
@@ -251,7 +281,7 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
                         if dl_url:
                             ext = ".mp4"
                             fname = os.path.join(dest_dir, f"cobalt_download{ext}")
-                            async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=120)) as dresp:
+                            async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=120), proxy=proxy_url) as dresp:
                                 if dresp.status == 200:
                                     with open(fname, "wb") as f:
                                         async for chunk in dresp.content.iter_chunked(512 * 1024):
@@ -317,6 +347,9 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
             cmd += ["--impersonate", "chrome"]
         if os.path.exists(COOKIES_FILE):
             cmd += ["--cookies", COOKIES_FILE]
+        proxy_url = get_proxy_url()
+        if proxy_url:
+            cmd += ["--proxy", proxy_url]
         cmd.append(url)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
@@ -468,12 +501,13 @@ def format_seconds(seconds):
 
 async def bypass_url(url):
     """Bypasses URL redirect shorteners (bit.ly, tinyurl, etc.) recursively."""
+    proxy_url = get_proxy_url()
     async with aiohttp.ClientSession() as session:
         current_url = url
         headers = {"User-Agent": "Mozilla/5.0"}
         for _ in range(5):  # Max 5 hops
             try:
-                async with session.head(current_url, headers=headers, allow_redirects=False) as resp:
+                async with session.head(current_url, headers=headers, allow_redirects=False, proxy=proxy_url) as resp:
                     if resp.status in (301, 302, 303, 307, 308):
                         next_url = resp.headers.get('Location')
                         if next_url:
@@ -484,12 +518,87 @@ async def bypass_url(url):
                 break
         return current_url
 
+INVIDIOUS_DOMAINS_CACHE = {
+    "domains": [],
+    "last_fetched": 0
+}
+
+async def get_invidious_domains():
+    now = time.time()
+    if INVIDIOUS_DOMAINS_CACHE["domains"] and (now - INVIDIOUS_DOMAINS_CACHE["last_fetched"]) < 3600:
+        return INVIDIOUS_DOMAINS_CACHE["domains"]
+        
+    proxy_url = get_proxy_url()
+    default_fallbacks = [
+        "yt.chocolatemoo53.com",
+        "invidious.nerdvpn.de",
+        "inv.nadeko.net",
+        "invidious.tiekoetter.com",
+        "invidious.flokinet.to"
+    ]
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.invidious.io/instances.json", proxy=proxy_url, timeout=10) as resp:
+                if resp.status == 200:
+                    instances_data = await resp.json()
+                    domains = []
+                    for item in instances_data:
+                        if isinstance(item, list) and len(item) == 2:
+                            domain = item[0]
+                            details = item[1]
+                            if not details:
+                                continue
+                            monitor = details.get("monitor") or {}
+                            is_up = not monitor.get("down")
+                            is_api = details.get("api") == True
+                            if is_up:
+                                domains.append((domain, is_api))
+                    
+                    # Sort API first
+                    api_domains = [d[0] for d in domains if d[1]]
+                    non_api_domains = [d[0] for d in domains if not d[1]]
+                    candidates = api_domains + non_api_domains
+                    if candidates:
+                        INVIDIOUS_DOMAINS_CACHE["domains"] = candidates
+                        INVIDIOUS_DOMAINS_CACHE["last_fetched"] = now
+                        return candidates
+    except Exception as e:
+        logger.warning(f"Failed to fetch Invidious instances list: {e}")
+        
+    return default_fallbacks
+
+async def search_youtube_invidious(query: str) -> str | None:
+    import urllib.parse
+    domains = await get_invidious_domains()
+    proxy_url = get_proxy_url()
+    encoded_query = urllib.parse.quote(query)
+    
+    for domain in domains[:10]:
+        search_url = f"https://{domain}/api/v1/search?q={encoded_query}"
+        logger.info(f"Trying Invidious search on {domain}...")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(search_url, proxy=proxy_url, timeout=8) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            video_id = data[0].get("videoId")
+                            if video_id:
+                                logger.info(f"Successfully resolved track via Invidious search ({domain}): {video_id}")
+                                return f"https://www.youtube.com/watch?v={video_id}"
+        except Exception as e:
+            logger.warning(f"Invidious search failed on {domain}: {e}")
+            
+    return None
+
 async def fetch_spotify_metadata(url):
     """Fetches track metadata from public Spotify page without API keys."""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    proxy_url = get_proxy_url()
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     # Extract Title
@@ -539,9 +648,10 @@ async def download_thumbnail(url, dest_dir):
     """Downloads video thumbnail in the background."""
     if not url:
         return None
+    proxy_url = get_proxy_url()
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=10) as resp:
+            async with session.get(url, timeout=10, proxy=proxy_url) as resp:
                 if resp.status == 200:
                     path = os.path.join(dest_dir, "thumb.jpg")
                     with open(path, "wb") as f:
@@ -624,6 +734,7 @@ async def download_direct_resilient(url, filepath, progress_message, bot, custom
     total_size = 0
     retries = 5
     last_update = 0
+    proxy_url = get_proxy_url()
 
     async with aiohttp.ClientSession() as session:
         while retries > 0:
@@ -639,7 +750,8 @@ async def download_direct_resilient(url, filepath, progress_message, bot, custom
                     url,
                     headers=req_headers,
                     allow_redirects=True,
-                    timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_read=60)
+                    timeout=aiohttp.ClientTimeout(total=None, connect=15, sock_read=60),
+                    proxy=proxy_url
                 ) as response:
                     # 416 = Range not satisfiable → file already complete
                     if response.status == 416:
@@ -810,6 +922,10 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         **get_ydl_cookie_opts(),
         **site_opts,
     }
+
+    proxy_url = get_proxy_url()
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
 
     if merge_fmt and has_ffmpeg:
         ydl_opts["merge_output_format"] = merge_fmt
@@ -1122,22 +1238,40 @@ async def run_file_conversion(input_path, target_format, temp_dir):
         loop = asyncio.get_running_loop()
         
         def process_docx():
+            # Try LibreOffice first (handles Persian RTL formatting and custom fonts much better than MS Word COM)
+            lo_path = None
+            if shutil.which("libreoffice"):
+                lo_path = shutil.which("libreoffice")
+            elif shutil.which("soffice"):
+                lo_path = shutil.which("soffice")
+            else:
+                # Check common installation path on Windows
+                win_lo = r"C:\Program Files\LibreOffice\program\soffice.exe"
+                if os.path.exists(win_lo):
+                    lo_path = win_lo
+            
+            if lo_path:
+                logger.info(f"Using LibreOffice for DOCX to PDF conversion: {lo_path}")
+                cmd_lo = [
+                    lo_path,
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", temp_dir,
+                    input_path
+                ]
+                subprocess.run(cmd_lo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                lo_output = os.path.join(temp_dir, name_part + ".pdf")
+                if os.path.exists(lo_output):
+                    return lo_output
+            
+            # Fallback to docx2pdf (MS Word COM) on Windows if LibreOffice is not available
             if os.name == 'nt':
+                logger.warning("LibreOffice not found. Falling back to docx2pdf (MS Word COM)...")
                 from docx2pdf import convert
                 convert(input_path, output_path)
                 return output_path
-            else:
-                if shutil.which("libreoffice") or shutil.which("soffice"):
-                    cmd_lo = [
-                        shutil.which("libreoffice") or shutil.which("soffice"),
-                        "--headless", "--convert-to", "pdf",
-                        "--outdir", temp_dir, input_path
-                    ]
-                    subprocess.run(cmd_lo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    lo_output = os.path.join(temp_dir, name_part + ".pdf")
-                    if os.path.exists(lo_output):
-                        return lo_output
-                raise Exception("Word conversion failed. LibreOffice/MS Word is not installed on this server.")
+                
+            raise Exception("Word conversion failed. LibreOffice is not installed on this server.")
                 
         return await loop.run_in_executor(None, process_docx)
         
@@ -1389,6 +1523,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💡 *FEATURES & USAGE / راهنما:*\n"
         f" ├─ *Media Links:* Send YouTube/Insta/TikTok links directly.\n"
         f" ├─ *Direct Links:* Send direct URLs (support `--name file.ext`).\n"
+        f" ├─ *Git Downloader:* Send GitHub/GitLab links to download repos, folders, or files.\n"
         f" ├─ *Search YouTube:* Use `/search <query>` to explore.\n"
         f" ├─ *Search Pornhub:* Use `/phsearch <query>` to find adult media.\n"
         f" ├─ *Convert Formats:* Send any file, photo, or audio.\n"
@@ -1404,7 +1539,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             KeyboardButton("🎵 Spotify Downloader"),
-            KeyboardButton("🔄 File Converter")
+            KeyboardButton("🐙 Git Downloader")
+        ],
+        [
+            KeyboardButton("🔄 File Converter"),
+            KeyboardButton("📥 Direct Link Downloader")
         ],
         [
             KeyboardButton("📊 Statistics"),
@@ -1426,6 +1565,9 @@ def run_youtube_search(query, page=1):
         **get_ydl_cookie_opts(),
         **get_site_specific_opts(search_url),
     }
+    proxy_url = get_proxy_url()
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(search_url, download=False)
         entries = info.get('entries', [])
@@ -1531,6 +1673,9 @@ async def run_pornhub_search(query, page=1):
                 },
                 **get_ydl_cookie_opts(),
             }
+            proxy_url = get_proxy_url()
+            if proxy_url:
+                opts["proxy"] = proxy_url
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(search_url, download=False)
                 return info.get('entries', []) if info else []
@@ -1562,9 +1707,10 @@ async def run_pornhub_search(query, page=1):
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://www.pornhub.com/'
     }
+    proxy_url = get_proxy_url()
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15), proxy=proxy_url) as r:
                 if r.status != 200:
                     return []
                 html = await r.text()
@@ -1688,8 +1834,9 @@ async def send_ph_preview(bot, chat_id, preview_url, title, reply_to_message_id)
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 }
+                proxy_url = get_proxy_url()
                 async with aiohttp.ClientSession(headers=headers) as session:
-                    async with session.get(preview_url) as resp:
+                    async with session.get(preview_url, proxy=proxy_url) as resp:
                         if resp.status == 200:
                             with open(temp_file, "wb") as f:
                                 f.write(await resp.read())
@@ -1787,7 +1934,8 @@ async def download_github_folder_recursive(session, owner, repo, path, branch, l
     if branch:
         params["ref"] = branch
         
-    async with session.get(url, headers=headers, params=params) as resp:
+    proxy_url = get_proxy_url()
+    async with session.get(url, headers=headers, params=params, proxy=proxy_url) as resp:
         if resp.status != 200:
             raise Exception(f"GitHub API error: {resp.status}")
         items = await resp.json()
@@ -1807,7 +1955,8 @@ async def download_github_folder_recursive(session, owner, repo, path, branch, l
             raw_headers = {}
             if token:
                 raw_headers["Authorization"] = f"token {token}"
-            async with session.get(download_url, headers=raw_headers) as file_resp:
+            proxy_url = get_proxy_url()
+            async with session.get(download_url, headers=raw_headers, proxy=proxy_url) as file_resp:
                 if file_resp.status == 200:
                     async with aiofiles.open(local_item_path, "wb") as f:
                         await f.write(await file_resp.read())
@@ -1825,7 +1974,8 @@ async def download_gitlab_folder_recursive(session, owner, repo, path, branch, l
     if branch:
         params["ref"] = branch
         
-    async with session.get(url, headers=headers, params=params) as resp:
+    proxy_url = get_proxy_url()
+    async with session.get(url, headers=headers, params=params, proxy=proxy_url) as resp:
         if resp.status != 200:
             raise Exception(f"GitLab API error: {resp.status}")
         items = await resp.json()
@@ -1846,7 +1996,7 @@ async def download_gitlab_folder_recursive(session, owner, repo, path, branch, l
             file_params = {}
             if branch:
                 file_params["ref"] = branch
-            async with session.get(file_url, headers=headers, params=file_params) as file_resp:
+            async with session.get(file_url, headers=headers, params=file_params, proxy=proxy_url) as file_resp:
                 if file_resp.status == 200:
                     async with aiofiles.open(local_item_path, "wb") as f:
                         await f.write(await file_resp.read())
@@ -2051,6 +2201,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🎵 Spotify Downloader":
         await message.reply_text("🎵 *Spotify Downloader / اسپاتیفای*\n\nSend any Spotify track link directly to the bot. I will automatically extract the song name, search for it, download it as MP3, and attach the original album art!\n\n*Example:* `https://open.spotify.com/track/4PTG3Z6ehGkBF3zI7YkR5C`", parse_mode="Markdown")
         return
+    elif text == "🐙 Git Downloader":
+        await message.reply_text(
+            "🐙 *GitHub & GitLab Downloader / دانلودر گیت* 🐙\n\n"
+            "You can download repositories, folders, files, or releases directly from GitHub/GitLab!\n\n"
+            "💡 *How to use:*\n"
+            "Simply send any GitHub or GitLab repository, folder, file, or release URL directly to the bot.\n\n"
+            "📝 *Example links:*\n"
+            "• Repo: `https://github.com/owner/repo`\n"
+            "• Folder: `https://github.com/owner/repo/tree/main/src`\n"
+            "• File: `https://github.com/owner/repo/blob/main/README.md`\n"
+            "• Release: `https://github.com/owner/repo/releases`\n\n"
+            "🔑 *Private Repositories:*\n"
+            "If the repository is private, set your personal access token first:\n"
+            "• For GitHub: `/github_token ghp_your_token_here`\n"
+            "• For GitLab: `/gitlab_token glpat-your_token_here` (or use `clear` to delete)",
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+        return
+    elif text == "📥 Direct Link Downloader":
+        await message.reply_text(
+            "📥 *Direct Link Downloader / دانلودر لینک مستقیم* 📥\n\n"
+            "You can download any file from the internet by sending its direct download link to the bot.\n\n"
+            "💡 *How to use:*\n"
+            "1️⃣ **Method 1:** Send the direct link to the file. If it has a standard extension (like `.zip`, `.pdf`, `.mp4`), the bot will download it automatically.\n\n"
+            "2️⃣ **Method 2:** Use the `/direct` command to force download any link directly (even if it doesn't end with a file extension).\n\n"
+            "📝 *Syntax:* `/direct <url> [--name custom_filename.ext]`\n"
+            "• *Example:* `/direct https://example.com/data --name info.zip`",
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+        return
     elif text == "🔄 File Converter":
         await message.reply_text("🔄 *File Converter / مبدل فایل*\n\nSimply send any document, image, or audio file directly to the bot. The bot will automatically analyze the format and present conversion options!\n\n*Supported conversions:*\n ├─ *Images:* PNG, JPG, WebP, PDF\n ├─ *Audios:* MP3, WAV, OGG\n └─ *Documents:* DOCX to PDF, PDF to Text (.txt)", parse_mode="Markdown")
         return
@@ -2161,35 +2343,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status_msg.edit_text(f"🔍 *Searching for:* `{track_artist} - {track_title}` on YouTube...", parse_mode="Markdown")
         
-        # Search YouTube for the track
+        # Search YouTube for the track using Invidious (fallback to yt-dlp)
         loop = asyncio.get_running_loop()
         try:
-            def search_yt_track():
-                search_query = f"ytsearch1:{track_artist} - {track_title}"
-                ydl_opts = {
-                    'quiet': True,
-                    'no_warnings': True,
-                    'noplaylist': True,
-                    'extract_flat': True,
-                    **get_ydl_cookie_opts(),
-                    **get_site_specific_opts(search_query),
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(search_query, download=False)
-                    entries = info.get('entries', [])
-                    if entries:
-                        entry = entries[0]
-                        # Build proper watch URL
-                        yt_url = entry.get('url') or entry.get('webpage_url') or ''
-                        video_id = entry.get('id', '')
-                        if yt_url and not yt_url.startswith('http'):
-                            yt_url = f"https://www.youtube.com/watch?v={yt_url}"
-                        if not yt_url and video_id:
-                            yt_url = f"https://www.youtube.com/watch?v={video_id}"
-                        return yt_url or None
-                return None
+            yt_url = await search_youtube_invidious(f"{track_artist} - {track_title}")
             
-            yt_url = await loop.run_in_executor(None, search_yt_track)
+            if not yt_url:
+                logger.info("Invidious search failed. Falling back to yt-dlp search...")
+                def search_yt_track():
+                    search_query = f"ytsearch1:{track_artist} - {track_title}"
+                    ydl_opts = {
+                        'quiet': True,
+                        'no_warnings': True,
+                        'noplaylist': True,
+                        'extract_flat': True,
+                        **get_ydl_cookie_opts(),
+                        **get_site_specific_opts(search_query),
+                    }
+                    proxy_url = get_proxy_url()
+                    if proxy_url:
+                        ydl_opts["proxy"] = proxy_url
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(search_query, download=False)
+                        entries = info.get('entries', [])
+                        if entries:
+                            entry = entries[0]
+                            # Build proper watch URL
+                            yt_url = entry.get('url') or entry.get('webpage_url') or ''
+                            video_id = entry.get('id', '')
+                            if yt_url and not yt_url.startswith('http'):
+                                yt_url = f"https://www.youtube.com/watch?v={yt_url}"
+                            if not yt_url and video_id:
+                                yt_url = f"https://www.youtube.com/watch?v={video_id}"
+                            return yt_url or None
+                    return None
+                
+                yt_url = await loop.run_in_executor(None, search_yt_track)
             if not yt_url:
                 await status_msg.edit_text("❌ *Song not found on YouTube search.*")
                 return
@@ -2725,8 +2914,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
                         url = f"https://gitlab.com/api/v4/projects/{project_id}/releases"
                         
+                    proxy_url = get_proxy_url()
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(url, headers=headers) as resp:
+                        async with session.get(url, headers=headers, proxy=proxy_url) as resp:
                             if resp.status != 200:
                                 await query.message.reply_text(f"❌ Failed to fetch releases: HTTP {resp.status}")
                                 return
@@ -2821,8 +3011,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 dl_url += f"?sha={branch}"
                             headers = {"PRIVATE-TOKEN": token} if token else {}
                             
+                        proxy_url = get_proxy_url()
                         async with aiohttp.ClientSession(headers=headers) as session:
-                            async with session.get(dl_url, allow_redirects=True) as resp:
+                            async with session.get(dl_url, allow_redirects=True, proxy=proxy_url) as resp:
                                 if resp.status != 200:
                                     await status_msg.edit_text(f"❌ Failed to download zip: HTTP {resp.status}")
                                     return
@@ -2857,8 +3048,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             headers = {"PRIVATE-TOKEN": token} if token else {}
                             params = {"ref": branch} if branch else {}
                             
+                        proxy_url = get_proxy_url()
                         async with aiohttp.ClientSession(headers=headers) as session:
-                            async with session.get(dl_url, params=params) as resp:
+                            async with session.get(dl_url, params=params, proxy=proxy_url) as resp:
                                 if resp.status != 200:
                                     await status_msg.edit_text(f"❌ Failed to download file: HTTP {resp.status}")
                                     return
@@ -2927,8 +3119,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 with tempfile.TemporaryDirectory() as temp_dir:
                     filepath = os.path.join(temp_dir, cached['title'])
+                    proxy_url = get_proxy_url()
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(cached['url']) as resp:
+                        async with session.get(cached['url'], proxy=proxy_url) as resp:
                             if resp.status == 200:
                                 with open(filepath, "wb") as f:
                                     f.write(await resp.read())
@@ -3644,6 +3837,9 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
+                proxy_url = get_proxy_url()
+                if proxy_url:
+                    ydl_opts["proxy"] = proxy_url
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=False)
             
@@ -3847,6 +4043,52 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
 
+async def direct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force download a URL directly using HTTP Range download bypass."""
+    message = update.message
+    user_id = update.effective_user.id
+    
+    args = context.args
+    if not args:
+        await message.reply_text(
+            "❌ Please specify the URL:\n"
+            "`/direct <url> [--name custom_filename.ext]`\n\n"
+            "Example:\n"
+            "`/direct https://example.com/data --name database.zip`",
+            parse_mode="Markdown"
+        )
+        return
+        
+    text = " ".join(args)
+    
+    # Parse Custom Rename Command
+    custom_name = None
+    name_match = re.search(r'--name\s+(\S+)', text)
+    if name_match:
+        custom_name = name_match.group(1)
+        text = re.sub(r'--name\s+\S+', '', text).strip()
+        
+    url_match = re.search(r"https?://\S+", text)
+    if not url_match:
+        await message.reply_text("❌ Please send a valid link starting with http or https.")
+        return
+        
+    url = url_match.group(0)
+    
+    # Bypass redirects
+    status_msg = await message.reply_text("🔍 *Resolving link redirects... / در حال بررسی لینک*", parse_mode="Markdown")
+    resolved_url = await bypass_url(url)
+    await status_msg.delete()
+    
+    # Enqueue as direct download task (format_opt=None forces direct download)
+    await add_to_queue(
+        url=resolved_url,
+        message_to_reply=message,
+        format_opt=None,
+        custom_name=custom_name,
+        user_id=user_id
+    )
+
 async def main_async(application):
     await start_web_server()
     task = asyncio.create_task(queue_worker(application.bot))
@@ -3876,7 +4118,12 @@ def main():
         return
 
     logger.info("Starting Telegram Bot...")
-    application = Application.builder().token(BOT_TOKEN).build()
+    proxy_url = get_proxy_url()
+    if proxy_url:
+        logger.info(f"Routing python-telegram-bot traffic through proxy: {proxy_url}")
+        application = Application.builder().token(BOT_TOKEN).proxy(proxy_url).get_updates_proxy(proxy_url).build()
+    else:
+        application = Application.builder().token(BOT_TOKEN).build()
 
     # Handlers
     application.add_handler(CommandHandler("start", start_command))
