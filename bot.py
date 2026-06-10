@@ -3428,17 +3428,39 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                     thumbnail_path = await download_thumbnail(cached_thumb, temp_dir)
 
                 if format_opt:
-                    # yt-dlp Video / Audio download
-                    await status_msg.edit_text("📥 *Downloading media... / در حال دانلود*", parse_mode="Markdown")
-                    bot_obj = status_msg.get_bot()
-                    tracker = ProgressTracker(context_bot_wrapper(status_msg), chat_id, status_msg.message_id, loop)
                     # Capture format_opt in local variable to avoid closure issues
                     _fmt = format_opt
                     _st = start_time
                     _et = end_time
-                    filepath = await loop.run_in_executor(
-                        None, lambda: download_yt(url, temp_dir, _fmt, _st, _et, tracker)
-                    )
+
+                    filepath = None
+                    # 🚀 Try Cobalt Bypass first if it's an impersonate site (YouTube/PornHub/etc.) and no trim is requested
+                    if is_impersonate_site(url) and not _st and not _et:
+                        try:
+                            await status_msg.edit_text("📥 *Bypassing restrictions (Cobalt)...*", parse_mode="Markdown")
+                            filepath = await _cobalt_download(url, temp_dir, audio_only=(_fmt == "audio"))
+                            if filepath and os.path.exists(filepath):
+                                logger.info(f"Successfully bypassed download blocks using Cobalt: {filepath}")
+                                # Rename to custom name or cached title if available
+                                ext = os.path.splitext(filepath)[1]
+                                final_title = custom_name or cached_title or "media"
+                                final_name = "".join([c for c in final_title if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+                                if not final_name.lower().endswith(ext.lower()):
+                                    final_name += ext
+                                new_filepath = os.path.join(temp_dir, final_name)
+                                os.rename(filepath, new_filepath)
+                                filepath = new_filepath
+                        except Exception as ce:
+                            logger.warning(f"Cobalt download failed, falling back to yt-dlp: {ce}")
+
+                    if not filepath:
+                        # yt-dlp Video / Audio download fallback
+                        await status_msg.edit_text("📥 *Downloading media (yt-dlp)... / در حال دانلود*", parse_mode="Markdown")
+                        bot_obj = status_msg.get_bot()
+                        tracker = ProgressTracker(context_bot_wrapper(status_msg), chat_id, status_msg.message_id, loop)
+                        filepath = await loop.run_in_executor(
+                            None, lambda: download_yt(url, temp_dir, _fmt, _st, _et, tracker)
+                        )
                 else:
                     # Resilient Direct HTTP chunk downloader
                     await status_msg.edit_text("📥 *Downloading direct file...*", parse_mode="Markdown")
