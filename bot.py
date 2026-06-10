@@ -46,8 +46,15 @@ except ImportError:
 def _auto_update_ytdlp():
     """Silently upgrades yt-dlp at bot startup so extractors stay fresh."""
     try:
+        clean_env = os.environ.copy()
+        if sys.platform.startswith('win'):
+            for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+                clean_env.pop(var, None)
+            clean_env['NO_PROXY'] = '*'
+            clean_env['no_proxy'] = '*'
         result = subprocess.run(
-            ["pip", "install", "-q", "--upgrade", "yt-dlp"],
+            [sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"],
+            env=clean_env,
             capture_output=True, text=True, timeout=60
         )
         if result.returncode == 0:
@@ -2224,7 +2231,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             err_str = str(e)
 
             # Detect YouTube/PornHub bot detection blocking
-            if any(x in err_str.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
+            if isinstance(e, AssertionError) or "assertion" in err_str.lower():
+                await status_msg.edit_text(
+                    "⚠️ *Cookie Format Error / خطای فرمت کوکی*\n\n"
+                    "🍪 The uploaded `cookies.txt` contains formatting errors (invalid Netscape format) which causes `yt-dlp` to crash.\n\n"
+                    "Please re-export your cookies using a browser extension (like *Get cookies.txt LOCALLY*) in Netscape format and re-send it.\n\n"
+                    "🔄 *Attempting queue download anyway...*",
+                    parse_mode="Markdown"
+                )
+                await add_to_queue(url, message, "video", custom_name, user_id=user_id)
+            elif any(x in err_str.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
                 await status_msg.edit_text(
                     "⚠️ *YouTube Bot Detection Active / بلاک توسط یوتیوب*\n\n"
                     "🍪 YouTube has blocked this request. To bypass this, please upload a `cookies.txt` file "
@@ -3454,7 +3470,16 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
             logger.error(f"Task failed: {e}", exc_info=True)
             err_msg = str(e)
             try:
-                if any(x in err_msg.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
+                if isinstance(e, AssertionError) or "assertion" in err_msg.lower():
+                    await status_msg.edit_text(
+                        f"❌ *Cookie Format Error / خطای فرمت کوکی*\n\n"
+                        f"The uploaded `cookies.txt` file contains formatting errors (invalid Netscape format), "
+                        f"which is causing `yt-dlp` to crash.\n\n"
+                        f"Please re-export your cookies using a browser extension (like *Get cookies.txt LOCALLY*), "
+                        f"ensuring it's in Netscape format, and send it to the bot again.",
+                        parse_mode="Markdown"
+                    )
+                elif any(x in err_msg.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
                     await status_msg.edit_text(
                         f"❌ *Download Failed (YouTube Bot Detection / Block)*\n\n"
                         f"YouTube has blocked this request. Please export your YouTube cookies as a `cookies.txt` file "
