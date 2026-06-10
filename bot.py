@@ -874,28 +874,42 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
 
         parts = None
         used_ffmpeg = False
+        loop = asyncio.get_running_loop()
+
         if is_video:
             await status_msg.edit_text("🎬 *Splitting video into playable parts using FFmpeg...*", parse_mode="Markdown")
-            parts = split_video_ffmpeg(filepath, os.path.dirname(filepath), MAX_PART_SIZE)
+            # Run blocking ffmpeg split in thread to avoid blocking event loop
+            _fp = filepath
+            parts = await loop.run_in_executor(
+                None, lambda: split_video_ffmpeg(_fp, os.path.dirname(_fp), MAX_PART_SIZE)
+            )
             if parts:
                 used_ffmpeg = True
 
         if not parts:
             await status_msg.edit_text("📦 *Splitting file into binary parts...*", parse_mode="Markdown")
-            parts = split_file_binary(filepath, MAX_PART_SIZE)
-            
+            _fp = filepath
+            parts = await loop.run_in_executor(
+                None, lambda: split_file_binary(_fp, MAX_PART_SIZE)
+            )
+
         total_parts = len(parts)
         await status_msg.edit_text(f"📦 *Split into {total_parts} parts.* Starting upload...", parse_mode="Markdown")
 
         try:
             for idx, part_path in enumerate(parts):
                 part_name = os.path.basename(part_path)
+                part_size_mb = os.path.getsize(part_path) / (1024 * 1024)
                 await status_msg.edit_text(
-                    f"📤 *Uploading part {idx + 1} of {total_parts}:* `{part_name}`...",
+                    f"📤 *Uploading part {idx + 1}/{total_parts}:* `{part_name}`\n"
+                    f"📦 *Size:* `{part_size_mb:.1f} MB`",
                     parse_mode="Markdown",
                 )
                 thumb_file = open(thumbnail_path, "rb") if thumbnail_path and os.path.exists(thumbnail_path) else None
-                
+
+                # Large file uploads need extended timeouts (5 minutes per part)
+                UPLOAD_TIMEOUT = 300
+
                 with open(part_path, "rb") as f:
                     if is_video and used_ffmpeg:
                         await bot.send_video(
@@ -904,7 +918,10 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
                             filename=part_name,
                             thumbnail=thumb_file,
                             reply_to_message_id=reply_to_message_id,
-                            supports_streaming=True
+                            supports_streaming=True,
+                            read_timeout=UPLOAD_TIMEOUT,
+                            write_timeout=UPLOAD_TIMEOUT,
+                            connect_timeout=30,
                         )
                     else:
                         await bot.send_document(
@@ -913,6 +930,9 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
                             filename=part_name,
                             thumbnail=thumb_file,
                             reply_to_message_id=reply_to_message_id,
+                            read_timeout=UPLOAD_TIMEOUT,
+                            write_timeout=UPLOAD_TIMEOUT,
+                            connect_timeout=30,
                         )
                 if thumb_file:
                     thumb_file.close()
@@ -933,7 +953,7 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
                     f"🍎🐧 *macOS / Linux:*\n```bash\n{merge_cmd_unix}\n```\n\n"
                     f"💡 *Alternative:* Put all parts in the same directory and extract the first part (`.part001`) using WinRAR or 7-Zip."
                 )
-                
+
             await bot.send_message(
                 chat_id=chat_id,
                 text=instructions,
