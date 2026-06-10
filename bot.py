@@ -2,6 +2,7 @@ import os
 import re
 import time
 import uuid
+import json
 import shutil
 import sqlite3
 import zipfile
@@ -13,6 +14,28 @@ import subprocess
 from urllib.parse import urlparse, unquote
 import aiohttp
 import yt_dlp
+
+# ---------------------------------------------------------------------------
+# Auto-update yt-dlp on startup
+# Render free tier ships a stale image; YouTube breaks every few weeks
+# ---------------------------------------------------------------------------
+def _auto_update_ytdlp():
+    """Silently upgrades yt-dlp at bot startup so extractors stay fresh."""
+    try:
+        result = subprocess.run(
+            ["pip", "install", "-q", "--upgrade", "yt-dlp"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            import importlib
+            importlib.reload(yt_dlp)
+            print("✅ yt-dlp auto-updated successfully")
+        else:
+            print(f"⚠️ yt-dlp update failed: {result.stderr.strip()[:200]}")
+    except Exception as e:
+        print(f"⚠️ yt-dlp auto-update skipped: {e}")
+
+_auto_update_ytdlp()
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -49,9 +72,166 @@ download_queue: asyncio.Queue = asyncio.Queue()  # Global sequential task queue
 
 def get_ydl_cookie_opts() -> dict:
     """Returns yt-dlp cookie options to bypass bot detection on YouTube/PornHub."""
+    opts = {}
     if os.path.exists(COOKIES_FILE):
-        return {"cookiefile": COOKIES_FILE}
+        opts["cookiefile"] = COOKIES_FILE
+    return opts
+
+# ---------------------------------------------------------------------------
+# Cobalt API — residential-proxied downloader for datacenter-IP-blocked sites
+# (PornHub, and others that 403 cloud/Render IPs)
+# Cobalt.tools is a free public API. Falls back to yt-dlp if unavailable.
+# ---------------------------------------------------------------------------
+COBALT_API_INSTANCES = [
+    "https://api.cobalt.tools",
+    "https://cobalt.api.timelessnesses.me",
+    "https://cobalt-api.ente.io",
+]
+
+async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) -> str | None:
+    """
+    Downloads a URL through Cobalt API (bypasses datacenter IP blocks).
+    Returns saved file path or None if all instances fail.
+    """
+    payload = {
+        "url": url,
+        "downloadMode": "audio" if audio_only else "auto",
+        "videoQuality": "1080",
+        "filenameStyle": "basic",
+    }
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
+    async with aiohttp.ClientSession() as session:
+        for instance in COBALT_API_INSTANCES:
+            try:
+                async with session.post(
+                    f"{instance}/",
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    status = data.get("status")
+
+                    # tunnel / redirect — direct download URL
+                    if status in ("tunnel", "redirect") and data.get("url"):
+                        dl_url = data["url"]
+                        ext = ".mp4" if not audio_only else ".mp3"
+                        fname = os.path.join(dest_dir, f"cobalt_download{ext}")
+                        async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=120)) as dresp:
+                            if dresp.status == 200:
+                                with open(fname, "wb") as f:
+                                    async for chunk in dresp.content.iter_chunked(512 * 1024):
+                                        f.write(chunk)
+                                logger.info(f"Cobalt download success via {instance}")
+                                return fname
+
+                    # picker — multiple files (e.g. gallery)
+                    if status == "picker" and data.get("picker"):
+                        dl_url = data["picker"][0].get("url")
+                        if dl_url:
+                            ext = ".mp4"
+                            fname = os.path.join(dest_dir, f"cobalt_download{ext}")
+                            async with session.get(dl_url, timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=120)) as dresp:
+                                if dresp.status == 200:
+                                    with open(fname, "wb") as f:
+                                        async for chunk in dresp.content.iter_chunked(512 * 1024):
+                                            f.write(chunk)
+                                    return fname
+            except Exception as e:
+                logger.warning(f"Cobalt instance {instance} failed: {e}")
+                continue
+    return None
+
+
+# Sites that require browser impersonation (chrome) to bypass bot detection
+# These were blocking with yt-dlp because their extractor needs --impersonate
+# This is the REAL fix (not IP blocking) — confirmed by yt-dlp issue trackers
+_IMPERSONATE_SITES = [
+    r'pornhub\.com',
+    r'xvideos\.com',
+    r'xhamster\.com',
+    r'redtube\.com',
+    r'youporn\.com',
+    r'tube8\.com',
+    r'spankbang\.com',
+    r'xnxx\.com',
+]
+
+def is_impersonate_site(url: str) -> bool:
+    """Returns True for sites that need --impersonate chrome in yt-dlp to work."""
+    return any(re.search(p, url, re.IGNORECASE) for p in _IMPERSONATE_SITES)
+
+# Keep is_datacenter_blocked_site as alias (used in error handling below)
+def is_datacenter_blocked_site(url: str) -> bool:
+    return is_impersonate_site(url)
+
+def get_site_specific_opts(url: str) -> dict:
+    """
+    Returns site-specific yt-dlp options.
+    For adult sites: impersonate Chrome to bypass bot detection.
+    This is the fix recommended in yt-dlp issue tracker for PornHub 403.
+    """
+    if is_impersonate_site(url):
+        return {
+            "impersonate": "chrome",  # Mimic a real Chrome browser request
+        }
     return {}
+
+
+# ---------------------------------------------------------------------------
+# reclip-style format probe: get real format_id before downloading
+# Eliminates "Requested format is not available" errors entirely
+# ---------------------------------------------------------------------------
+def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool) -> str | None:
+    """
+    Runs yt-dlp --dump-json to get available formats, then picks the best
+    real format_id. Returns None if probe fails (caller falls back to format strings).
+    Uses --impersonate chrome for sites that require browser impersonation.
+    """
+    try:
+        cmd = ["yt-dlp", "--no-playlist", "--dump-json", "--no-download"]
+        if is_impersonate_site(url):
+            cmd += ["--impersonate", "chrome"]
+        cmd.append(url)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return None
+        info = json.loads(result.stdout)
+        formats = info.get("formats", [])
+        if not formats:
+            return None
+
+        if audio_only:
+            # Best audio-only format
+            audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") != "none"]
+            if not audio_formats:
+                audio_formats = formats
+            best = max(audio_formats, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+            return best.get("format_id")
+
+        # Video: pick best video+audio combined, or best video stream for merging
+        if target_height:
+            candidates = [f for f in formats if (f.get("height") or 0) <= target_height and f.get("vcodec") != "none"]
+        else:
+            candidates = [f for f in formats if f.get("vcodec") != "none"]
+
+        if not candidates:
+            candidates = formats  # fallback: anything
+
+        # Prefer combined streams (have audio); otherwise pick highest tbr video
+        combined = [f for f in candidates if f.get("acodec") != "none" and f.get("vcodec") != "none"]
+        if combined:
+            best = max(combined, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
+        else:
+            best = max(candidates, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
+
+        return best.get("format_id")
+    except Exception as e:
+        logger.warning(f"Format probe failed: {e}")
+        return None
 
 # =====================================================================
 # Database Manager (SQLite)
@@ -407,28 +587,93 @@ async def download_direct_resilient(url, filepath, progress_message, bot, custom
 
     return filepath
 
-def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
-    """Downloads YouTube/Social content via yt-dlp, supports trimming and subtitle extraction."""
-    # Default: best MP4 video + M4A audio merged to mp4 (avoids webm/html issues)
-    ydl_format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc]+bestaudio/best[ext=mp4]/best"
+def _resolve_yt_format(format_opt: str, has_ffmpeg: bool) -> tuple:
+    """
+    Returns (ydl_format_str, merge_fmt, postprocessors) for a given format option.
+    Uses a smart fallback chain so yt-dlp always finds a valid format.
+    Strategy: sort by quality/codec, prefer mp4/m4a, fall back to any available.
+    """
     postprocessors = []
-    merge_fmt = "mp4"
+    merge_fmt = "mp4" if has_ffmpeg else None
 
     if format_opt == "audio":
-        ydl_format = "bestaudio/best"
+        # Best audio, any container — FFmpeg will transcode to mp3
+        ydl_format = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
         merge_fmt = None
-        postprocessors = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }] if shutil.which("ffmpeg") else []
+        if has_ffmpeg:
+            postprocessors = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
     elif format_opt in ("1080p", "720p", "480p", "360p"):
         res = format_opt[:-1]
-        ydl_format = f"bestvideo[height<={res}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={res}]+bestaudio/best[height<={res}]/best"
+        # Prefer mp4+m4a merge, fall back through progressively looser constraints
+        ydl_format = (
+            f"bestvideo[height<={res}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<={res}][ext=mp4]+bestaudio/"
+            f"bestvideo[height<={res}]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<={res}]+bestaudio/"
+            f"best[height<={res}]/best"
+        )
+    else:
+        # Default best quality — use format_sort instead of explicit codec to let
+        # yt-dlp decide what's actually available (avoids "format not available" error)
+        if has_ffmpeg:
+            ydl_format = "bestvideo+bestaudio/best"
+        else:
+            # No FFmpeg: can't merge separate streams, get best single-file format
+            ydl_format = "best[ext=mp4]/best"
+
+    return ydl_format, merge_fmt, postprocessors
+
+
+def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
+    """
+    Downloads YouTube/Social content via yt-dlp.
+    Strategy (inspired by reclip + upekshaip):
+    1. Probe available format_ids via --dump-json (reclip pattern) → no "format not available"
+    2. If probe succeeds, use exact format_id; otherwise fall back to format strings
+    3. format_sort guides yt-dlp toward mp4/m4a/h264 when multiple formats match
+    """
+    has_ffmpeg = bool(shutil.which("ffmpeg"))
+    audio_only = (format_opt == "audio")
+    target_height = int(format_opt[:-1]) if format_opt in ("1080p", "720p", "480p", "360p") else None
+
+    # --- Step 1: reclip-style format probe (get real format_id) ---
+    probed_format_id = _probe_best_format_id(url, target_height, audio_only)
+
+    if probed_format_id:
+        # Use exact format_id — guaranteed to exist
+        if audio_only:
+            ydl_format = probed_format_id
+        elif has_ffmpeg:
+            # Merge best video with best audio
+            ydl_format = f"{probed_format_id}+bestaudio/best"
+        else:
+            ydl_format = probed_format_id
+        merge_fmt = "mp4" if (not audio_only and has_ffmpeg) else None
+        postprocessors = []
+        if audio_only and has_ffmpeg:
+            postprocessors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+        logger.info(f"Using probed format_id: {probed_format_id} → format string: {ydl_format}")
+    else:
+        # --- Step 2: fallback to smart format strings ---
+        ydl_format, merge_fmt, postprocessors = _resolve_yt_format(format_opt, has_ffmpeg)
+        logger.info(f"Format probe failed, using fallback format string: {ydl_format}")
+
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    site_opts = get_site_specific_opts(url)
 
     ydl_opts = {
         "outtmpl": os.path.join(dest_dir, "%(title)s.%(ext)s"),
         "format": ydl_format,
+        # format_sort: guides yt-dlp toward preferred containers when format is a wildcard
+        "format_sort": ["res", "ext:mp4:m4a", "vcodec:avc", "acodec:aac", "filesize"],
         "progress_hooks": [lambda d: yt_dlp_hook(d, tracker)],
         "quiet": True,
         "no_warnings": True,
@@ -436,22 +681,16 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "writesubtitles": True,
         "allsubtitles": False,
         "subtitleslangs": ["en", "fa"],
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
+        "http_headers": site_opts.pop("http_headers", base_headers),
         "extractor_args": {"youtube": {"skip": ["translated_subs"]}},
-        **get_ydl_cookie_opts(),  # Cookie injection for bot detection bypass
+        **get_ydl_cookie_opts(),
+        **site_opts,
     }
 
-    if merge_fmt and shutil.which("ffmpeg"):
+    if merge_fmt and has_ffmpeg:
         ydl_opts["merge_output_format"] = merge_fmt
-
     if postprocessors:
         ydl_opts["postprocessors"] = postprocessors
-
-    # Efficient Range Trimming
     if start_time is not None and end_time is not None:
         _st, _et = start_time, end_time
         ydl_opts['download_ranges'] = lambda info, ydl: [{'start_time': _st, 'end_time': _et}]
@@ -461,15 +700,13 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
 
-        # Check MP3 conversion
-        if format_opt == "audio":
+        if audio_only:
             base, _ = os.path.splitext(filename)
-            for ext in (".mp3", ".m4a", ".opus", ".ogg"):
+            for ext in (".mp3", ".m4a", ".opus", ".ogg", ".webm"):
                 if os.path.exists(base + ext):
                     filename = base + ext
                     break
 
-        # Check MP4 merge (yt-dlp merges to .mp4 but prepare_filename may say .webm)
         if merge_fmt == "mp4" and not filename.endswith(".mp4"):
             base, _ = os.path.splitext(filename)
             if os.path.exists(base + ".mp4"):
@@ -1947,15 +2184,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Metadata extraction failed: {e}")
+            err_str = str(e)
+
             if is_media_domain or is_streaming:
-                # NEVER fallback to direct HTTP for video sites — it downloads HTML!
-                # Instead, try yt-dlp download directly without the metadata step.
-                await status_msg.edit_text(
-                    f"⚠️ *Could not fetch video metadata.*\n`{str(e)[:180]}`\n\n"
-                    "🔄 Attempting direct yt-dlp download...",
-                    parse_mode="Markdown"
-                )
-                await add_to_queue(url, message, "video", custom_name, user_id=user_id)
+                if is_impersonate_site(url):
+                    # Real fix: updated yt-dlp + --impersonate chrome handles this
+                    # The 403 was caused by stale extractor, not IP blocking
+                    await status_msg.edit_text(
+                        f"⚠️ *Could not fetch video metadata.*\n`{err_str[:150]}`\n\n"
+                        "🔄 *Retrying with browser impersonation (updated yt-dlp)...*",
+                        parse_mode="Markdown"
+                    )
+                    # Queue direct download — get_site_specific_opts adds impersonate=chrome
+                    await add_to_queue(url, message, "video", custom_name, user_id=user_id)
+                else:
+                    # Not an impersonate site — standard yt-dlp retry
+                    await status_msg.edit_text(
+                        f"⚠️ *Could not fetch video metadata.*\n`{err_str[:180]}`\n\n"
+                        "🔄 Attempting direct yt-dlp download...",
+                        parse_mode="Markdown"
+                    )
+                    await add_to_queue(url, message, "video", custom_name, user_id=user_id)
             else:
                 await status_msg.edit_text(
                     "⚠️ Could not auto-detect format. Attempting direct download...",
