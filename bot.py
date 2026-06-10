@@ -30,6 +30,14 @@ if sys.platform.startswith('win'):
     os.environ['NO_PROXY'] = '*'
     os.environ['no_proxy'] = '*'
 
+# Check if curl_cffi is installed to support browser impersonation targets
+try:
+    import curl_cffi
+    _HAS_IMPERSONATE = True
+except ImportError:
+    _HAS_IMPERSONATE = False
+
+
 
 # ---------------------------------------------------------------------------
 # Auto-update yt-dlp on startup
@@ -193,7 +201,7 @@ def get_site_specific_opts(url: str) -> dict:
     For adult sites: impersonate Chrome to bypass bot detection.
     This is the fix recommended in yt-dlp issue tracker for PornHub 403.
     """
-    if is_impersonate_site(url):
+    if is_impersonate_site(url) and _HAS_IMPERSONATE:
         return {
             "impersonate": "chrome",  # Mimic a real Chrome browser request
         }
@@ -212,7 +220,7 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
     """
     try:
         cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--dump-json", "--no-download"]
-        if is_impersonate_site(url):
+        if is_impersonate_site(url) and _HAS_IMPERSONATE:
             cmd += ["--impersonate", "chrome"]
         if os.path.exists(COOKIES_FILE):
             cmd += ["--cookies", COOKIES_FILE]
