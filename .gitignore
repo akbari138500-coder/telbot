@@ -1,0 +1,20 @@
+# Database
+bot_data.db
+
+# Python virtual environment
+
+venv/
+.venv/
+ENV/
+
+# Environment variables (contains bot token)
+.env
+
+# Download and parts directories
+*.part*
+downloads/
+temp/
+*.tmp
+__pycache__/
+*.py[cod]
+*$py.class

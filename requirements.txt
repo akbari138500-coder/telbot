@@ -1,0 +1,8 @@
+python-telegram-bot>=20.0
+yt-dlp
+aiohttp
+aiofiles
+python-dotenv
+Pillow
+pypdf
+docx2pdf
