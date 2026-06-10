@@ -178,7 +178,7 @@ async def fetch_spotify_metadata(url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            async with session.get(url, timeout=10) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     # Extract Title
@@ -266,6 +266,13 @@ def yt_dlp_hook(d, tracker):
         tracker.update(text)
     elif d["status"] == "finished":
         tracker.update("📥 *Download finished! Processing file... / در حال پردازش فایل*")
+
+class context_bot_wrapper:
+    """Wraps a message object to provide edit_message_text compatible with ProgressTracker."""
+    def __init__(self, message_obj):
+        self.message = message_obj
+    async def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
+        return await self.message.edit_text(text, parse_mode=parse_mode)
 
 class ProgressTracker:
     def __init__(self, bot, chat_id, message_id, loop):
@@ -393,11 +400,14 @@ async def download_direct_resilient(url, filepath, progress_message, bot, custom
 
 def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
     """Downloads YouTube/Social content via yt-dlp, supports trimming and subtitle extraction."""
-    ydl_format = "best"
+    # Default: best MP4 video + M4A audio merged to mp4 (avoids webm/html issues)
+    ydl_format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc]+bestaudio/best[ext=mp4]/best"
     postprocessors = []
+    merge_fmt = "mp4"
 
     if format_opt == "audio":
         ydl_format = "bestaudio/best"
+        merge_fmt = None
         postprocessors = [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -416,26 +426,41 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "noplaylist": True,
         "writesubtitles": True,
         "allsubtitles": False,
-        "subtitleslangs": ["en", "fa"],  # Grab English/Persian subtitles if available
+        "subtitleslangs": ["en", "fa"],
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
     }
-    
+
+    if merge_fmt and shutil.which("ffmpeg"):
+        ydl_opts["merge_output_format"] = merge_fmt
+
     if postprocessors:
         ydl_opts["postprocessors"] = postprocessors
 
-    # Efficient Range Trimming (Downloads only the specified segment instead of full file)
+    # Efficient Range Trimming
     if start_time is not None and end_time is not None:
-        ydl_opts['download_ranges'] = lambda info, self: [{'start_time': start_time, 'end_time': end_time}]
+        _st, _et = start_time, end_time
+        ydl_opts['download_ranges'] = lambda info, ydl: [{'start_time': _st, 'end_time': _et}]
         ydl_opts['force_keyframes_at_cuts'] = True
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-        
-        # Check if MP3 conversion occurred
-        if format_opt == "audio" and not filename.endswith(".mp3"):
+
+        # Check MP3 conversion
+        if format_opt == "audio":
             base, _ = os.path.splitext(filename)
-            if os.path.exists(base + ".mp3"):
-                filename = base + ".mp3"
+            for ext in (".mp3", ".m4a", ".opus", ".ogg"):
+                if os.path.exists(base + ext):
+                    filename = base + ext
+                    break
+
+        # Check MP4 merge (yt-dlp merges to .mp4 but prepare_filename may say .webm)
+        if merge_fmt == "mp4" and not filename.endswith(".mp4"):
+            base, _ = os.path.splitext(filename)
+            if os.path.exists(base + ".mp4"):
+                filename = base + ".mp4"
 
         return filename
 
@@ -1005,12 +1030,21 @@ async def render_search_page(message, query, page, query_uuid, edit=False):
         for idx, entry in enumerate(entries):
             global_idx = (page - 1) * 5 + idx + 1
             title = entry.get('title', 'Video')
-            url = entry.get('url')
-            text += f"{global_idx}️⃣ *{title[:50]}...*\n      └─ 🔗 {url}\n\n"
-            
+            # Build proper YouTube watch URL from id or url field
+            video_url = entry.get('url') or entry.get('webpage_url') or ''
+            video_id = entry.get('id', '')
+            if video_url and not video_url.startswith('http'):
+                video_url = f"https://www.youtube.com/watch?v={video_url}"
+            if not video_url and video_id:
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+            if not video_url:
+                continue
+            title_display = title[:50] + ('...' if len(title) > 50 else '')
+            text += f"{global_idx}️⃣ *{title_display}*\n      └─ 🔗 `{video_url}`\n\n"
+
             url_id = uuid.uuid4().hex[:8]
             URL_CACHE[url_id] = {
-                'url': url,
+                'url': video_url,
                 'title': title,
                 'thumbnail': entry.get('thumbnail'),
                 'duration': entry.get('duration', 0)
@@ -1056,124 +1090,145 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await render_search_page(update.message, query, 1, query_uuid, edit=False)
 
 async def run_pornhub_search(query, page=1):
+    """Search Pornhub via yt-dlp (most reliable) with HTML scraping as fallback."""
     import urllib.parse
-    url = f"https://www.pornhub.com/video/search?search={urllib.parse.quote(query)}&page={page}"
+    loop = asyncio.get_event_loop()
+    per_page = 5
+    offset = (page - 1) * per_page
+
+    # Primary: yt-dlp search on PornHub search URL
+    try:
+        search_url = f"https://www.pornhub.com/video/search?search={urllib.parse.quote(query)}&page={((page-1)//4)+1}"
+
+        def _ytdlp_ph_search():
+            opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(search_url, download=False)
+                return info.get('entries', []) if info else []
+
+        entries = await loop.run_in_executor(None, _ytdlp_ph_search)
+        slice_offset = ((page - 1) % 4) * per_page
+        entries = entries[slice_offset:slice_offset + per_page]
+
+        if entries:
+            items = []
+            for e in entries:
+                items.append({
+                    'vkey': e.get('id', ''),
+                    'title': e.get('title', 'Pornhub Video'),
+                    'thumbnail': e.get('thumbnail', ''),
+                    'preview_url': None,
+                    'duration': str(int(e.get('duration', 0) or 0)) + 's' if e.get('duration') else '00:00',
+                    'url': e.get('url') or e.get('webpage_url') or f"https://www.pornhub.com/view_video.php?viewkey={e.get('id','')}",
+                })
+            return items
+    except Exception as e:
+        logger.warning(f"yt-dlp PH search failed, falling back to HTML scraping: {e}")
+
+    # Fallback: HTML scraping
+    import urllib.parse as _up
+    url = f"https://www.pornhub.com/video/search?search={_up.quote(query)}&page={page}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://www.pornhub.com/'
     }
-    
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, headers=headers, timeout=12) as r:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 if r.status != 200:
-                    logger.error(f"Pornhub search HTTP error: {r.status}")
                     return []
                 html = await r.text()
         except Exception as e:
-            logger.error(f"Pornhub search request failed: {e}")
+            logger.error(f"Pornhub HTML scrape failed: {e}")
             return []
-            
+
     vkeys = re.findall(r'data-video-vkey="([^"]+)"', html)
     items = []
     seen = set()
-    
     for vk in vkeys:
-        if vk in seen:
+        if vk in seen or len(items) >= per_page:
             continue
         seen.add(vk)
-        
         idx = html.find(f'data-video-vkey="{vk}"')
         if idx == -1:
             continue
-        sub = html[idx:idx+2500]
-        
-        title_match = re.search(r'title="([^"]+)"', sub)
+        sub = html[idx:idx + 2500]
+        title_match = re.search(r'title="([^"<>]{3,100})"', sub)
         title = title_match.group(1) if title_match else "Pornhub Video"
-        
-        thumb_match = re.search(r'data-mediabook="([^"]+)"', sub)
-        preview_url = thumb_match.group(1) if thumb_match else None
-        
-        img_match = re.search(r'data-medium-img="([^"]+)"', sub)
-        if not img_match:
-            img_match = re.search(r'data-thumb="([^"]+)"', sub)
-        if not img_match:
-            img_match = re.search(r'src="([^"]+)"', sub)
+        preview_match = re.search(r'data-mediabook="([^"]+)"', sub)
+        preview_url = preview_match.group(1) if preview_match else None
+        img_match = (re.search(r'data-medium-img="([^"]+)"', sub) or
+                     re.search(r'data-thumb="([^"]+)"', sub))
         thumbnail_url = img_match.group(1) if img_match else ""
-        
-        duration_match = re.search(r'<var class="duration">([^<]+)</var>', sub)
-        if not duration_match:
-            duration_match = re.search(r'<span class="duration">([^<]+)</span>', sub)
-        duration = duration_match.group(1) if duration_match else "00:00"
-        
+        dur_match = (re.search(r'<var class="duration">([^<]+)</var>', sub) or
+                     re.search(r'<span class="duration">([^<]+)</span>', sub))
+        duration = dur_match.group(1).strip() if dur_match else "00:00"
         items.append({
-            'vkey': vk,
-            'title': title,
-            'thumbnail': thumbnail_url,
-            'preview_url': preview_url,
-            'duration': duration,
+            'vkey': vk, 'title': title, 'thumbnail': thumbnail_url,
+            'preview_url': preview_url, 'duration': duration,
             'url': f"https://www.pornhub.com/view_video.php?viewkey={vk}"
         })
-        
     return items
 
 async def render_phsearch_page(message, query, page, query_uuid, edit=False):
     try:
-        ph_page = ((page - 1) // 4) + 1
-        slice_start = ((page - 1) % 4) * 5
-        slice_end = slice_start + 5
-        
-        raw_items = await run_pornhub_search(query, ph_page)
-        entries = raw_items[slice_start:slice_end]
-        
+        entries = await run_pornhub_search(query, page)
+
         if not entries:
             if edit:
                 await message.edit_text("❌ No more results found.")
             else:
                 await message.reply_text("❌ No results found.")
             return
-            
+
         text = f"🔞 *PORNHUB SEARCH / جستجوی پورن‌هاب*\n{DIVIDER}\nQuery: `{query}`\nPage: `{page}`\n\n"
         keyboard = []
-        
+
         for idx, entry in enumerate(entries):
             global_idx = (page - 1) * 5 + idx + 1
-            title = entry['title']
-            duration = entry['duration']
-            text += f"{global_idx}️⃣ *{title[:50]}...*\n      └─ ⏱ `{duration}`\n\n"
-            
+            title = entry.get('title', 'Pornhub Video')
+            duration = entry.get('duration', '00:00')
+            title_display = title[:50] + ('...' if len(title) > 50 else '')
+            text += f"{global_idx}️⃣ *{title_display}*\n      └─ ⏱ `{duration}`\n\n"
+
             url_id = uuid.uuid4().hex[:8]
-            dur_seconds = parse_time_str(duration) or 0
-            
+            dur_seconds = parse_time_str(str(duration)) or 0
+
             URL_CACHE[url_id] = {
-                'url': entry['url'],
+                'url': entry.get('url', ''),
                 'title': title,
-                'thumbnail': entry['thumbnail'],
-                'preview_url': entry['preview_url'],
+                'thumbnail': entry.get('thumbnail', ''),
+                'preview_url': entry.get('preview_url'),
                 'duration': dur_seconds,
                 'is_ph': True
             }
-            
-            row = [
-                InlineKeyboardButton(f"🎬 Preview #{global_idx}", callback_data=f"phprev:{url_id}"),
-                InlineKeyboardButton(f"📥 Download #{global_idx}", callback_data=f"opt:{url_id}")
-            ]
+
+            row = []
+            if entry.get('preview_url'):
+                row.append(InlineKeyboardButton(f"🎬 Preview #{global_idx}", callback_data=f"phprev:{url_id}"))
+            row.append(InlineKeyboardButton(f"📥 Download #{global_idx}", callback_data=f"opt:{url_id}"))
             keyboard.append(row)
-            
+
         pagination_row = []
         if page > 1:
             pagination_row.append(InlineKeyboardButton("◀️ Prev (قبلی)", callback_data=f"phsrc:{page - 1}:{query_uuid}"))
         pagination_row.append(InlineKeyboardButton("▶️ Next (بعدی)", callback_data=f"phsrc:{page + 1}:{query_uuid}"))
         keyboard.append(pagination_row)
-        
+
         if edit:
             await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         else:
             await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Pornhub search rendering failed: {e}")
+        logger.error(f"Pornhub search rendering failed: {e}", exc_info=True)
         err_msg = f"❌ *Search failed:* `{str(e)[:150]}`"
         if edit:
             await message.edit_text(err_msg, parse_mode="Markdown")
@@ -1689,7 +1744,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             def search_yt_track():
                 ydl_opts = {
-                    'format': 'bestaudio/best',
                     'quiet': True,
                     'no_warnings': True,
                     'noplaylist': True,
@@ -1699,8 +1753,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     info = ydl.extract_info(f"ytsearch1:{track_artist} - {track_title}", download=False)
                     entries = info.get('entries', [])
                     if entries:
-                        return entries[0].get('url')
-                    return None
+                        entry = entries[0]
+                        # Build proper watch URL
+                        yt_url = entry.get('url') or entry.get('webpage_url') or ''
+                        video_id = entry.get('id', '')
+                        if yt_url and not yt_url.startswith('http'):
+                            yt_url = f"https://www.youtube.com/watch?v={yt_url}"
+                        if not yt_url and video_id:
+                            yt_url = f"https://www.youtube.com/watch?v={video_id}"
+                        return yt_url or None
+                return None
             
             yt_url = await loop.run_in_executor(None, search_yt_track)
             if not yt_url:
@@ -1833,8 +1895,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Metadata extraction failed: {e}")
-            await status_msg.edit_text(f"❌ *Failed to extract details:* `{str(e)[:150]}`. Trying to download directly...", parse_mode="Markdown")
-            await add_to_queue(url, message, None, custom_name, user_id=user_id)
+            if is_media_domain or is_streaming:
+                # NEVER fallback to direct HTTP for video sites — it downloads HTML!
+                # Instead, try yt-dlp download directly without the metadata step.
+                await status_msg.edit_text(
+                    f"⚠️ *Could not fetch video metadata.*\n`{str(e)[:180]}`\n\n"
+                    "🔄 Attempting direct yt-dlp download...",
+                    parse_mode="Markdown"
+                )
+                await add_to_queue(url, message, "video", custom_name, user_id=user_id)
+            else:
+                await status_msg.edit_text(
+                    "⚠️ Could not auto-detect format. Attempting direct download...",
+                    parse_mode="Markdown"
+                )
+                await add_to_queue(url, message, None, custom_name, user_id=user_id)
     else:
         # Direct link download
         await status_msg.delete()
@@ -2962,14 +3037,25 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                 if format_opt:
                     # yt-dlp Video / Audio download
                     await status_msg.edit_text("📥 *Downloading media... / در حال دانلود*", parse_mode="Markdown")
+                    bot_obj = status_msg.get_bot()
                     tracker = ProgressTracker(context_bot_wrapper(status_msg), chat_id, status_msg.message_id, loop)
+                    # Capture format_opt in local variable to avoid closure issues
+                    _fmt = format_opt
+                    _st = start_time
+                    _et = end_time
                     filepath = await loop.run_in_executor(
-                        None, lambda: download_yt(url, temp_dir, format_opt, start_time, end_time, tracker)
+                        None, lambda: download_yt(url, temp_dir, _fmt, _st, _et, tracker)
                     )
                 else:
                     # Resilient Direct HTTP chunk downloader
                     await status_msg.edit_text("📥 *Downloading direct file...*", parse_mode="Markdown")
-                    filepath = await download_direct_resilient(url, filepath=os.path.join(temp_dir, "file"), progress_message=status_msg, bot=status_msg.get_bot(), custom_name=custom_name)
+                    filepath = await download_direct_resilient(
+                        url,
+                        filepath=os.path.join(temp_dir, "file"),
+                        progress_message=status_msg,
+                        bot=status_msg.get_bot(),
+                        custom_name=custom_name
+                    )
 
                 if filepath and os.path.exists(filepath):
                     # Send media
@@ -2989,7 +3075,10 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                     await status_msg.edit_text("❌ *Download completed but file was not found locally.*")
         except Exception as e:
             logger.error(f"Task failed: {e}", exc_info=True)
-            await status_msg.edit_text(f"❌ *Failed download task:* `{str(e)[:200]}`", parse_mode="Markdown")
+            try:
+                await status_msg.edit_text(f"❌ *Failed download task:* `{str(e)[:200]}`", parse_mode="Markdown")
+            except Exception:
+                pass
 
     pos = download_queue.qsize() + 1
     if pos > 1:
@@ -3028,12 +3117,13 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
                         entry_url = entry.get('url')
                         if not entry_url:
                             continue
-                        await status_msg.edit_text(f"📥 *[ZIP Build] Downloading {idx + 1}/{len(entries)}:* `{entry.get('title')[:30]}...`", parse_mode="Markdown")
+                        await status_msg.edit_text(f"📥 *[ZIP Build] Downloading {idx + 1}/{len(entries)}:* `{entry.get('title', '')[:30]}...`", parse_mode="Markdown")
                         try:
                             tracker = ProgressTracker(context_bot_wrapper(status_msg), chat_id, status_msg.message_id, loop)
+                            _eurl = entry_url
                             # Sync wrapper download
                             fn = await loop.run_in_executor(
-                                None, lambda: download_yt(entry_url, temp_dir, "video", None, None, tracker)
+                                None, lambda: download_yt(_eurl, temp_dir, "video", None, None, tracker)
                             )
                             if fn and os.path.exists(fn):
                                 downloaded_files.append(fn)
@@ -3132,20 +3222,21 @@ async def add_conversion_to_queue(file_id, filename, target_format, message_to_r
         await status_msg.edit_text(f"⏳ *Queue Position:* #{pos}\nWaiting for other tasks to complete...")
     await download_queue.put(conversion_task)
 
-class context_bot_wrapper:
-    def __init__(self, message_obj):
-        self.message = message_obj
-    async def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
-        return await self.message.edit_text(text, parse_mode=parse_mode)
+# context_bot_wrapper is defined earlier in the file (before ProgressTracker)
 
 async def queue_worker(bot):
     """Processes downloads sequentially from queue."""
     while True:
         task = await download_queue.get()
         try:
-            await task()
+            if asyncio.iscoroutinefunction(task):
+                await task()
+            elif asyncio.iscoroutine(task):
+                await task
+            else:
+                await task()
         except Exception as e:
-            logger.error(f"Error executing queue task: {e}")
+            logger.error(f"Error executing queue task: {e}", exc_info=True)
         finally:
             download_queue.task_done()
 
