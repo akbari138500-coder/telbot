@@ -2221,7 +2221,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             err_str = str(e)
 
             # Detect YouTube/PornHub bot detection blocking
-            if "confirm you" in err_str.lower() or "not a bot" in err_str.lower() or "429" in err_str or "format is not available" in err_str.lower():
+            if any(x in err_str.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
                 await status_msg.edit_text(
                     "⚠️ *YouTube Bot Detection Active / بلاک توسط یوتیوب*\n\n"
                     "🍪 YouTube has blocked this request. To bypass this, please upload a `cookies.txt` file "
@@ -3451,16 +3451,17 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
             logger.error(f"Task failed: {e}", exc_info=True)
             err_msg = str(e)
             try:
-                if "confirm you" in err_msg.lower() or "not a bot" in err_msg.lower() or "format is not available" in err_msg.lower():
+                if any(x in err_msg.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
                     await status_msg.edit_text(
-                        f"❌ *Download Failed (YouTube Bot Detection)*\n\n"
+                        f"❌ *Download Failed (YouTube Bot Detection / Block)*\n\n"
                         f"YouTube has blocked this request. Please export your YouTube cookies as a `cookies.txt` file "
                         f"using a browser extension and send the file directly to this bot to bypass it.\n\n"
                         f"Run the /cookies command for step-by-step instructions.",
                         parse_mode="Markdown"
                     )
                 else:
-                    await status_msg.edit_text(f"❌ *Failed download task:* `{err_msg[:200]}`", parse_mode="Markdown")
+                    display_msg = err_msg if err_msg.strip() else f"Unknown error ({type(e).__name__})"
+                    await status_msg.edit_text(f"❌ *Failed download task:* `{display_msg[:200]}`", parse_mode="Markdown")
             except Exception:
                 pass
 
