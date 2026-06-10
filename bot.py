@@ -87,7 +87,8 @@ logger = logging.getLogger(__name__)
 # Constants
 MAX_PART_SIZE = 48 * 1024 * 1024  # 48MB hard limit (Telegram rejects at 50MB)
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
-COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")  # Path to cookies.txt for bot detection bypass
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt"))  # Path to cookies.txt for bot detection bypass
 
 # State Cache & Databases
 URL_CACHE = {}          # Store media details (uuid -> data)
@@ -267,7 +268,9 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
 # =====================================================================
 class DbManager:
     """Manages bot statistics using an embedded SQLite database."""
-    def __init__(self, db_path="bot_data.db"):
+    def __init__(self, db_path=None):
+        if db_path is None:
+            db_path = os.getenv("DB_PATH", os.path.join(BASE_DIR, "bot_data.db"))
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.create_tables()
