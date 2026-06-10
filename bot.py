@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import uuid
 import json
@@ -14,6 +15,21 @@ import subprocess
 from urllib.parse import urlparse, unquote
 import aiohttp
 import yt_dlp
+
+# Force stdout/stderr to UTF-8 encoding (especially on Windows)
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
+# Bypass Windows registry proxy settings if not explicitly defined in the environment
+if sys.platform.startswith('win'):
+    for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+        if var not in os.environ:
+            os.environ[var] = ''
+    os.environ['NO_PROXY'] = '*'
+    os.environ['no_proxy'] = '*'
+
 
 # ---------------------------------------------------------------------------
 # Auto-update yt-dlp on startup
@@ -195,7 +211,7 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
     Uses --impersonate chrome for sites that require browser impersonation.
     """
     try:
-        cmd = ["yt-dlp", "--no-playlist", "--dump-json", "--no-download"]
+        cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--dump-json", "--no-download"]
         if is_impersonate_site(url):
             cmd += ["--impersonate", "chrome"]
         if os.path.exists(COOKIES_FILE):
@@ -2196,7 +2212,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Metadata extraction failed: {e}")
             err_str = str(e)
 
-            if is_media_domain or is_streaming:
+            # Detect YouTube/PornHub bot detection blocking
+            if "confirm you" in err_str.lower() or "not a bot" in err_str.lower() or "429" in err_str or "format is not available" in err_str.lower():
+                await status_msg.edit_text(
+                    "⚠️ *YouTube Bot Detection Active / بلاک توسط یوتیوب*\n\n"
+                    "🍪 YouTube has blocked this request. To bypass this, please upload a `cookies.txt` file "
+                    "or run the /cookies command for step-by-step instructions.\n\n"
+                    "🔄 *Attempting queue download anyway...*",
+                    parse_mode="Markdown"
+                )
+                await add_to_queue(url, message, "video", custom_name, user_id=user_id)
+            elif is_media_domain or is_streaming:
                 if is_impersonate_site(url):
                     # Real fix: updated yt-dlp + --impersonate chrome handles this
                     # The 403 was caused by stale extractor, not IP blocking
@@ -3415,8 +3441,18 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                     await status_msg.edit_text("❌ *Download completed but file was not found locally.*")
         except Exception as e:
             logger.error(f"Task failed: {e}", exc_info=True)
+            err_msg = str(e)
             try:
-                await status_msg.edit_text(f"❌ *Failed download task:* `{str(e)[:200]}`", parse_mode="Markdown")
+                if "confirm you" in err_msg.lower() or "not a bot" in err_msg.lower() or "format is not available" in err_msg.lower():
+                    await status_msg.edit_text(
+                        f"❌ *Download Failed (YouTube Bot Detection)*\n\n"
+                        f"YouTube has blocked this request. Please export your YouTube cookies as a `cookies.txt` file "
+                        f"using a browser extension and send the file directly to this bot to bypass it.\n\n"
+                        f"Run the /cookies command for step-by-step instructions.",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await status_msg.edit_text(f"❌ *Failed download task:* `{err_msg[:200]}`", parse_mode="Markdown")
             except Exception:
                 pass
 
