@@ -1660,6 +1660,32 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
     user_id = update.effective_user.id
 
+    # Check if user is actively building a PDF album
+    if user_id in USER_STATES and USER_STATES[user_id].get('state') == 'AWAITING_PDF_ALBUM_IMAGES':
+        img_id = None
+        if message.photo:
+            img_id = message.photo[-1].file_id
+        elif message.document:
+            _, ext = os.path.splitext((message.document.file_name or "").lower())
+            if ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"]:
+                img_id = message.document.file_id
+        
+        if img_id:
+            USER_STATES[user_id]['pdf_album'].append(img_id)
+            album_size = len(USER_STATES[user_id]['pdf_album'])
+            
+            keyboard = [
+                [InlineKeyboardButton("📄 Compile PDF Album Now", callback_data="pdfalbum_build_active")],
+                [InlineKeyboardButton("❌ Cancel / Exit Mode", callback_data="pdfalbum_cancel")]
+            ]
+            await message.reply_text(
+                f"📸 *Image added to your album!* (Total: `{album_size}`)\n\n"
+                f"Send more images, or click below to build the PDF album now.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+
     # Identify file details
     file_id = None
     filename = None
@@ -1806,6 +1832,154 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = query.data.split(":")
     action = data[0]
+
+    # Handle Converter Guides & Active Mode Actions
+    if action == "conv_guide":
+        guide_type = data[1]
+        if guide_type == "cancel":
+            await query.delete_message()
+            return
+        elif guide_type == "back":
+            keyboard = [
+                [
+                    InlineKeyboardButton("📉 Video Compressor", callback_data="conv_guide:compress"),
+                    InlineKeyboardButton("🎬 Subtitle Burner", callback_data="conv_guide:sub")
+                ],
+                [
+                    InlineKeyboardButton("🎭 Voice Effects", callback_data="conv_guide:vfx"),
+                    InlineKeyboardButton("🏷 Music Tag Editor", callback_data="conv_guide:tags")
+                ],
+                [
+                    InlineKeyboardButton("🔒 PDF Security", callback_data="conv_guide:pdfsec"),
+                    InlineKeyboardButton("📂 PDF Album Builder", callback_data="conv_guide:pdfalbum")
+                ],
+                [
+                    InlineKeyboardButton("❌ Close", callback_data="conv_guide:cancel")
+                ]
+            ]
+            await query.edit_message_text(
+                "🔄 *ADVANCED MEDIA & DOCUMENT ENGINE* 🔄\n"
+                f"{DIVIDER}\n"
+                "Select a dedicated tool below to start, or simply upload any file directly to the bot!\n\n"
+                "👇 *Choose a tool / انتخاب ابزار:*",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+
+        guide_texts = {
+            'compress': (
+                "📉 *Video Compressor / فشرده‌سازی ویدیو* 📉\n\n"
+                "To compress a video file, please **upload/send the video file** directly to the bot now.\n\n"
+                "I will automatically detect it and show you quality compression options."
+            ),
+            'sub': (
+                "🎬 *Subtitle Burner / هاردکد کردن زیرنویس* 🎬\n\n"
+                "To burn subtitles into a video:\n"
+                "1. First, **upload/send the video file** directly to this bot.\n"
+                "2. When the options keyboard appears, click **Add Subtitle (زیرنویس)**.\n"
+                "3. You will then be prompted to send the `.srt` subtitle file."
+            ),
+            'vfx': (
+                "🎭 *Voice & Audio Effects / افکت‌های صدا* 🎭\n\n"
+                "To apply fun voice effects (Alien, Chipmunk, Robot, Echo):\n"
+                "1. **Upload/send your audio or voice message** file directly to the bot.\n"
+                "2. Click **Voice Effects** on the conversion options menu."
+            ),
+            'tags': (
+                "🏷 *Music Tag Editor / ویرایشگر تگ* 🏷\n\n"
+                "To edit MP3 album, artist, and title metadata tags:\n"
+                "1. **Upload/send your MP3/audio file** to the bot.\n"
+                "2. Click **Edit Tags** on the options keyboard.\n"
+                "3. Enter the tags in the requested format."
+            ),
+            'pdfsec': (
+                "🔒 *PDF Security / امنیت پی‌دی‌اف* 🔒\n\n"
+                "To lock (encrypt) or unlock (decrypt) a PDF file:\n"
+                "1. **Upload/send your PDF file** directly to the bot.\n"
+                "2. Select **Protect PDF** or **Unlock PDF** on the options keyboard.\n"
+                "3. Enter the desired password."
+            )
+        }
+
+        if guide_type == "pdfalbum":
+            USER_STATES[user_id] = {
+                'state': 'AWAITING_PDF_ALBUM_IMAGES',
+                'pdf_album': []
+            }
+            keyboard = [
+                [InlineKeyboardButton("📄 Compile PDF Album", callback_data="pdfalbum_build_active")],
+                [InlineKeyboardButton("❌ Cancel / Exit Mode", callback_data="pdfalbum_cancel")]
+            ]
+            await query.edit_message_text(
+                "📂 *PDF Album Builder Mode / ساخت آلبوم پی‌دی‌اف* 📂\n\n"
+                "Send your images now! They will be added to the album. When finished, click the button below.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+
+        text = guide_texts.get(guide_type, "Invalid selection.")
+        keyboard = [[InlineKeyboardButton("◀️ Back (بازگشت)", callback_data="conv_guide:back")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    if action == "pdfalbum_build_active":
+        album = USER_STATES.get(user_id, {}).get('pdf_album', [])
+        if not album:
+            await query.edit_message_text("❌ No images in PDF album. Please send some images first!")
+            return
+
+        await query.edit_message_text("⏳ *Building and compiling PDF album...*", parse_mode="Markdown")
+
+        async def pdf_album_task():
+            try:
+                status_msg = await query.message.reply_text("🚀 *PDF Album compilation started...*")
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    bot = query.message.get_bot()
+                    image_paths = []
+                    from PIL import Image
+
+                    for idx, img_file_id in enumerate(album):
+                        await status_msg.edit_text(f"📥 *Downloading image {idx+1}/{len(album)}...*")
+                        tg_file = await bot.get_file(img_file_id)
+                        img_path = os.path.join(temp_dir, f"img_{idx}.jpg")
+                        await tg_file.download_to_drive(img_path)
+                        image_paths.append(img_path)
+
+                    await status_msg.edit_text("📄 *Generating PDF...*")
+                    pdf_path = os.path.join(temp_dir, "album.pdf")
+                    opened_images = [Image.open(img_p).convert("RGB") for img_p in image_paths]
+
+                    if opened_images:
+                        opened_images[0].save(pdf_path, save_all=True, append_images=opened_images[1:])
+
+                        await status_msg.edit_text("📤 *Uploading PDF Album...*")
+                        with open(pdf_path, "rb") as f:
+                            await bot.send_document(
+                                chat_id=query.message.chat_id,
+                                document=f,
+                                filename="album.pdf",
+                                reply_to_message_id=query.message.reply_to_message.message_id if query.message.reply_to_message else None
+                            )
+                        await status_msg.delete()
+                    else:
+                        await status_msg.edit_text("❌ Failed to compile album: images could not be loaded.")
+            except Exception as e:
+                logger.error(f"PDF Album build failed: {e}")
+                await query.message.reply_text(f"❌ *Failed to build PDF album:* `{str(e)[:150]}`")
+
+            if user_id in USER_STATES and 'pdf_album' in USER_STATES[user_id]:
+                USER_STATES[user_id].pop('pdf_album', None)
+            USER_STATES.pop(user_id, None)
+
+        await download_queue.put(pdf_album_task)
+        return
+
+    if action == "pdfalbum_cancel":
+        USER_STATES.pop(user_id, None)
+        await query.edit_message_text("❌ *PDF Album Builder mode canceled and exited.*", parse_mode="Markdown")
+        return
 
     # Handle Search Pagination Page request
     if action == "src":
