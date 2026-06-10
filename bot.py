@@ -477,41 +477,48 @@ def split_video_ffmpeg(filepath, dest_dir, max_part_size=MAX_PART_SIZE):
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", filepath
         ]
-        duration = float(subprocess.check_output(cmd).decode().strip())
+        duration = float(subprocess.check_output(cmd, stderr=subprocess.PIPE).decode().strip())
+        if duration <= 0:
+            return None
         bitrate = file_size / duration
-        segment_duration = int((max_part_size * 0.9) / bitrate)
-        
+        segment_duration = int((max_part_size * 0.85) / bitrate)  # 85% safety margin
+
         if segment_duration <= 0 or segment_duration >= duration:
             return None
-            
-        base_name = os.path.basename(filepath)
-        name_part, ext = os.path.splitext(base_name)
-        output_template = os.path.join(dest_dir, f"{name_part}.part%03d{ext}")
-        
+
+        _, ext = os.path.splitext(filepath)
+        ext = ext or ".mp4"
+        # Use a safe ASCII prefix to avoid filename matching issues with special chars
+        safe_prefix = "videopart"
+        output_template = os.path.join(dest_dir, f"{safe_prefix}%03d{ext}")
+
         cmd_split = [
             "ffmpeg", "-y", "-i", filepath, "-c", "copy", "-map", "0",
-            "-segment_time", str(segment_duration), "-f", "segment", output_template
+            "-segment_time", str(segment_duration), "-f", "segment",
+            "-reset_timestamps", "1", output_template
         ]
         subprocess.run(cmd_split, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        parts = []
-        for f in sorted(os.listdir(dest_dir)):
-            if f.startswith(name_part + ".part") and f.endswith(ext):
-                parts.append(os.path.join(dest_dir, f))
-        return parts
+
+        parts = sorted([
+            os.path.join(dest_dir, f)
+            for f in os.listdir(dest_dir)
+            if f.startswith(safe_prefix) and f.endswith(ext)
+        ])
+        return parts if parts else None
     except Exception as e:
         logger.error(f"FFmpeg segmenting failed: {e}")
         return None
 
 def split_file_binary(file_path, chunk_size):
-    """Splits raw files into chunks."""
+    """Splits raw files into 48MB chunks (safe margin under Telegram's 50MB limit)."""
+    SAFE_CHUNK = 48 * 1024 * 1024  # 48MB - safer than 49MB for Telegram
     parts = []
     base_name = os.path.basename(file_path)
     dir_name = os.path.dirname(file_path)
     part_num = 1
     with open(file_path, "rb") as f:
         while True:
-            chunk = f.read(chunk_size)
+            chunk = f.read(SAFE_CHUNK)
             if not chunk:
                 break
             part_name = f"{base_name}.part{part_num:03d}"
