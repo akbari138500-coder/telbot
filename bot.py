@@ -812,11 +812,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     keyboard = [
         [
-            KeyboardButton("🔍 Search / جستجو"),
-            KeyboardButton("📊 Stats / آمار")
+            KeyboardButton("🔍 YouTube Search"),
+            KeyboardButton("🎵 Spotify Downloader")
         ],
         [
-            KeyboardButton("❓ Help / راهنما")
+            KeyboardButton("🔄 File Converter"),
+            KeyboardButton("📊 Statistics")
+        ],
+        [
+            KeyboardButton("❓ Help & Guide")
         ]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -916,13 +920,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text.strip()
 
     # Handle Bottom Menu Buttons
-    if text == "🔍 Search / جستجو":
-        await message.reply_text("🔎 *To search YouTube, type:* `/search <query>`\n\n*Example:* `/search coldplay`", parse_mode="Markdown")
+    if text == "🔍 YouTube Search":
+        await message.reply_text("🔎 *YouTube Search / جستجوی یوتیوب*\n\nType `/search <query>` to search for videos.\n\n*Example:* `/search coldplay`", parse_mode="Markdown")
         return
-    elif text == "📊 Stats / آمار":
+    elif text == "🎵 Spotify Downloader":
+        await message.reply_text("🎵 *Spotify Downloader / اسپاتیفای*\n\nSend any Spotify track link directly to the bot. I will automatically extract the song name, search for it, download it as MP3, and attach the original album art!\n\n*Example:* `https://open.spotify.com/track/4PTG3Z6ehGkBF3zI7YkR5C`", parse_mode="Markdown")
+        return
+    elif text == "🔄 File Converter":
+        await message.reply_text("🔄 *File Converter / مبدل فایل*\n\nSimply send any document, image, or audio file directly to the bot. The bot will automatically analyze the format and present conversion options!\n\n*Supported conversions:*\n ├─ *Images:* PNG, JPG, WebP, PDF\n ├─ *Audios:* MP3, WAV, OGG\n └─ *Documents:* DOCX to PDF, PDF to Text (.txt)", parse_mode="Markdown")
+        return
+    elif text == "📊 Statistics":
         await stats_command(update, context)
         return
-    elif text == "❓ Help / راهنما":
+    elif text == "❓ Help & Guide":
         await start_command(update, context)
         return
 
