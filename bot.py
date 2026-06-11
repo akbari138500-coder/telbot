@@ -2737,18 +2737,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         custom_name = name_match.group(1)
         text = re.sub(r'--name\s+\S+', '', text).strip()
 
-    # Extract URL
+    # Extract URL safely without UTF-16 offset bugs
     urls = []
+    
+    # 1. Check for text_link (inline hyperlinks)
     for entity in message.entities or []:
-        if entity.type == "url":
-            urls.append(message.text[entity.offset : entity.offset + entity.length])
-        elif entity.type == "text_link":
+        if entity.type == "text_link":
             urls.append(entity.url)
-
-    if not urls:
-        url_match = re.search(r"https?://\S+", text)
-        if url_match:
-            urls.append(url_match.group(0))
+            
+    # 2. Robust Regex for explicit URLs in text (avoids offset issues with emojis)
+    url_matches = re.findall(r"(?:https?://|www\.)[^\s]+", message.text)
+    for match in url_matches:
+        if match not in urls:
+            urls.append(match)
+            
+    # 3. Fallback for raw domain inputs like "youtube.com/watch?v=..."
+    if not urls and re.match(r"^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/[^\s]+", text):
+        urls.append("https://" + text)
 
     if not urls:
         engine = USER_STATES.get(user_id, {}).get("ai_engine", "gemini")
