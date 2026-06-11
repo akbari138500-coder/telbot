@@ -751,6 +751,74 @@ async def upload_to_techpulse(filepath, custom_filename=None):
         logger.error(f"TechPulse upload exception: {e}")
         return False, str(e)
 
+UPLOAD_CACHE = {}
+
+async def register_file_for_upload(bot, chat_id, filepath, filename, reply_to_message_id=None):
+    """
+    Moves filepath to a persistent downloads_cache directory,
+    presents an inline button for optional TechPulse upload,
+    and schedules automatic cleanup after 10 minutes.
+    """
+    if not filepath or not os.path.exists(filepath):
+        return
+
+    # Create unique cache directory
+    unique_id = uuid.uuid4().hex[:8]
+    cache_dir = os.path.join("downloads_cache", unique_id)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except Exception as e:
+        logger.error(f"Failed to create cache dir: {e}")
+        return
+
+    # Target path in cache
+    cached_path = os.path.join(cache_dir, filename)
+    try:
+        shutil.move(filepath, cached_path)
+    except Exception as e:
+        logger.error(f"Failed to move file to cache, attempting copy: {e}")
+        try:
+            shutil.copy2(filepath, cached_path)
+        except Exception as ec:
+            logger.error(f"Failed to copy file to cache: {ec}")
+            return
+
+    # Store in global dictionary
+    UPLOAD_CACHE[unique_id] = {
+        'filepath': cached_path,
+        'filename': filename
+    }
+
+    # Setup inline button
+    keyboard = [
+        [InlineKeyboardButton("☁️ Upload to TechPulse / آپلود روی پلتفرم", callback_data=f"tp_upload:{unique_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"☁️ *آپلود در پلتفرم TechPulse*\nآیا مایلید فایل `{filename}` روی سایت آپلود شود؟",
+            reply_markup=reply_markup,
+            reply_to_message_id=reply_to_message_id,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send upload button: {e}")
+
+    # Schedule deletion in 10 minutes
+    async def cleanup_task():
+        await asyncio.sleep(600)
+        try:
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir)
+                logger.info(f"Cleaned up cached upload dir: {cache_dir}")
+            UPLOAD_CACHE.pop(unique_id, None)
+        except Exception as ex:
+            logger.error(f"Error cleaning up cache dir {cache_dir}: {ex}")
+
+    asyncio.create_task(cleanup_task())
+
 async def download_thumbnail(url, dest_dir):
     """Downloads video thumbnail in the background."""
     if not url:
@@ -1489,19 +1557,9 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
             if thumb_file:
                 thumb_file.close()
             await status_msg.delete()
-            
             if sent_msg:
                 await setup_cloud_button(bot, chat_id, sent_msg.message_id)
-                try:
-                    tp_status = await bot.send_message(chat_id=chat_id, text="☁️ *Uploading file to TechPulse...*", parse_mode="Markdown")
-                    success, detail = await upload_to_techpulse(filepath)
-                    if success:
-                        await tp_status.edit_text("✅ *File uploaded to TechPulse successfully!*")
-                    else:
-                        await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
-                except Exception as ex:
-                    logger.error(f"Failed to trigger TechPulse upload: {ex}")
-                
+                await register_file_for_upload(bot, chat_id, filepath, filename)
         except Exception as e:
             await status_msg.edit_text(f"❌ *Failed to upload:* {str(e)}")
             raise e
@@ -1603,15 +1661,7 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
                 parse_mode="Markdown",
             )
             await status_msg.delete()
-            try:
-                tp_status = await bot.send_message(chat_id=chat_id, text="☁️ *Uploading original unsplit file to TechPulse...*", parse_mode="Markdown")
-                success, detail = await upload_to_techpulse(filepath)
-                if success:
-                    await tp_status.edit_text("✅ *Original file uploaded to TechPulse successfully!*")
-                else:
-                    await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
-            except Exception as ex:
-                logger.error(f"Failed to trigger TechPulse upload: {ex}")
+            await register_file_for_upload(bot, chat_id, filepath, filename)
         except Exception as e:
             await status_msg.edit_text(f"❌ *Error during split upload:* {str(e)}")
             raise e
@@ -3140,6 +3190,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split(":")
     action = data[0]
 
+    # Handle TechPulse Upload Option Callback
+    if action == "tp_upload":
+        unique_id = data[1]
+        cached_info = UPLOAD_CACHE.get(unique_id)
+        if not cached_info:
+            await query.answer("❌ این فایل منقضی شده است (مهلت ۱۰ دقیقه به پایان رسیده).", show_alert=True)
+            return
+
+        filepath = cached_info['filepath']
+        filename = cached_info['filename']
+
+        if not os.path.exists(filepath):
+            await query.answer("❌ فایل روی سرور یافت نشد.", show_alert=True)
+            return
+
+        await query.answer("در حال آپلود روی سایت...")
+        status_msg = await query.message.reply_text("☁️ *در حال آپلود فایل روی پلتفرم TechPulse... / Uploading...*", parse_mode="Markdown")
+
+        success, detail = await upload_to_techpulse(filepath, custom_filename=filename)
+        if success:
+            await status_msg.edit_text(f"✅ فایل `{filename}` با موفقیت روی سایت آپلود شد!")
+        else:
+            await status_msg.edit_text(f"❌ آپلود فایل شکست خورد: `{detail}`")
+        return
+
     # Handle GitHub & GitLab Interactive Explorer Navigation
     if action == "gitnav":
         url_id = data[1]
@@ -3288,13 +3363,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 await bot_obj.send_document(chat_id=chat_id, document=f, filename=f"{repo}.zip")
                             await status_msg.delete()
                             
-                            # Upload ZIP to TechPulse
-                            tp_status = await bot_obj.send_message(chat_id=chat_id, text="☁️ *Uploading ZIP to TechPulse...*", parse_mode="Markdown")
-                            success, detail = await upload_to_techpulse(zip_file)
-                            if success:
-                                await tp_status.edit_text("✅ *ZIP uploaded to TechPulse successfully!*")
-                            else:
-                                await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                            await register_file_for_upload(bot_obj, chat_id, zip_file, f"{repo}.zip")
                         else:
                             folder_name = os.path.basename(path)
                             await status_msg.edit_text(f"📥 *Downloading Folder contents:* `{folder_name}`...")
@@ -3325,13 +3394,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 await bot_obj.send_document(chat_id=chat_id, document=f, filename=f"{folder_name}.zip")
                             await status_msg.delete()
                             
-                            # Upload ZIP to TechPulse
-                            tp_status = await bot_obj.send_message(chat_id=chat_id, text="☁️ *Uploading ZIP to TechPulse...*", parse_mode="Markdown")
-                            success, detail = await upload_to_techpulse(final_zip)
-                            if success:
-                                await tp_status.edit_text("✅ *ZIP uploaded to TechPulse successfully!*")
-                            else:
-                                await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                            await register_file_for_upload(bot_obj, chat_id, final_zip, f"{folder_name}.zip")
                 except Exception as e:
                     logger.error(f"Git ZIP download failed: {e}")
                     await query.message.reply_text(f"❌ *Git download failed:* `{str(e)[:150]}`")
@@ -3388,13 +3451,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             )
                         await status_msg.delete()
                         
-                        # Upload to TechPulse automatically
-                        tp_status = await query.message.reply_text("☁️ *Uploading file to TechPulse...*")
-                        success, detail = await upload_to_techpulse(dest_file)
-                        if success:
-                            await tp_status.edit_text("✅ *File uploaded to TechPulse successfully!*")
-                        else:
-                            await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                        await register_file_for_upload(query.message.get_bot(), query.message.chat_id, dest_file, item['name'])
                 except Exception as e:
                     logger.error(f"Git file download failed: {e}")
                     await query.message.reply_text(f"❌ *File download failed:* `{str(e)[:150]}`")
@@ -4484,15 +4541,7 @@ async def add_conversion_to_queue(file_id, filename, target_format, message_to_r
                             reply_to_message_id=reply_id
                         )
                     await status_msg.delete()
-                    try:
-                        tp_status = await bot.send_message(chat_id=chat_id, text="☁️ *Uploading converted file to TechPulse...*", parse_mode="Markdown")
-                        success, detail = await upload_to_techpulse(output_filepath)
-                        if success:
-                            await tp_status.edit_text("✅ *Converted file uploaded to TechPulse successfully!*")
-                        else:
-                            await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
-                    except Exception as ex:
-                        logger.error(f"Failed to trigger TechPulse upload: {ex}")
+                    await register_file_for_upload(bot, chat_id, output_filepath, os.path.basename(output_filepath))
                 else:
                     await status_msg.edit_text("❌ *Conversion failed.* Could not build output file.")
         except Exception as e:
