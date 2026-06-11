@@ -1701,21 +1701,21 @@ async def setup_cloud_button(bot, chat_id, message_id):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends welcome message and instructions with premium visual layout."""
     welcome_text = (
-        f"🤖 *SENIOR DOWNLOADER & CONVERTER* \n"
-        f"{DIVIDER}\n"
-        f"Welcome to the ultimate media downloader and file converter bot. "
-        f"Built for speed, reliability, and rich functionality.\n\n"
-        f"💡 *FEATURES & USAGE / راهنما:*\n"
-        f" ├─ *Media Links:* Send YouTube/Insta/TikTok links directly.\n"
-        f" ├─ *Direct Links:* Send direct URLs (support `--name file.ext`).\n"
-        f" ├─ *Git Downloader:* Send GitHub/GitLab links to download repos, folders, or files.\n"
-        f" ├─ *Search YouTube:* Use `/search <query>` to explore.\n"
-        f" ├─ *Search Pornhub:* Use `/phsearch <query>` to find adult media.\n"
-        f" ├─ *Convert Formats:* Send any file, photo, or audio.\n"
-        f" ├─ *Trimming:* Click '✂️ Trim' to download a video range.\n"
-        f" ├─ *Playlists:* Download as multiple files or a single ZIP.\n"
-        f" └─ *Usage Statistics:* View stats with `/stats`.\n\n"
-        f"✨ *Start by sending a link or a file!*"
+        f"🌟 *S E N I O R  D O W N L O A D E R* 🌟\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Welcome to the ultimate media & utility bot! 🚀\n"
+        f"به پیشرفته‌ترین ربات دانلودر و دستیار هوشمند خوش آمدید.\n\n"
+        f"✨ *Q U I C K  G U I D E  /  راهـنـمـای سـریـع:*\n"
+        f"🔹 *Media / رسانه:* Send any YouTube, Insta, or TikTok link.\n"
+        f"🔹 *Music / موزیک:* Send a Spotify link to get the MP3.\n"
+        f"🔹 *Files / فایل:* Send any file/photo to see conversion options.\n"
+        f"🔹 *Code / برنامه‌نویسی:* Send a GitHub/GitLab link to download it.\n"
+        f"🔹 *AI / هوش مصنوعی:* Click on AI Chat to start talking.\n\n"
+        f"💡 *Commands / دستورات:*\n"
+        f"🔸 `/search <name>` : Search YouTube videos\n"
+        f"🔸 `/direct <url>` : Force download direct files\n"
+        f"🔸 `/stats` : View your usage statistics\n\n"
+        f"👇 *Choose an option from the menu below:* / از منوی زیر انتخاب کنید:"
     )
     keyboard = [
         [
@@ -2585,48 +2585,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle Bottom Menu Buttons
     if text == "🔍 YouTube Search":
-        await message.reply_text("🔎 *YouTube Search / جستجوی یوتیوب*\n\nType `/search <query>` to search for videos.\n\n*Example:* `/search coldplay`", parse_mode="Markdown")
+        await message.reply_text(
+            "🔎 *YouTube Search / جستجوی یوتیوب*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "You can search for any video right here!\n\n"
+            "⌨️ *Usage:* `/search <query>`\n"
+            "📌 *Example:* `/search interstellar soundtrack`", 
+            parse_mode="Markdown"
+        )
         return
     elif text == "🔞 Pornhub Search":
-        await message.reply_text("🔞 *Pornhub Search / جستجوی پورن‌هاب*\n\nType `/phsearch <query>` to search for videos.\n\n*Example:* `/phsearch milf`", parse_mode="Markdown")
+        await message.reply_text(
+            "🔞 *Pornhub Search / جستجوی پورن‌هاب*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Search for adult content securely.\n\n"
+            "⌨️ *Usage:* `/phsearch <query>`\n"
+            "📌 *Example:* `/phsearch amateur`", 
+            parse_mode="Markdown"
+        )
         return
     elif text == "🎵 Spotify Downloader":
-        await message.reply_text("🎵 *Spotify Downloader / اسپاتیفای*\n\nSend any Spotify track link directly to the bot. I will automatically extract the song name, search for it, download it as MP3, and attach the original album art!\n\n*Example:* `https://open.spotify.com/track/4PTG3Z6ehGkBF3zI7YkR5C`", parse_mode="Markdown")
+        await message.reply_text(
+            "🎵 *Spotify Downloader / اسپاتیفای*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Get high-quality MP3s straight from Spotify!\n\n"
+            "✨ *How it works:*\n"
+            "Just paste the Spotify Track Link. I will fetch the metadata, download the song, and attach the original album cover!\n\n"
+            "📌 *Example:* `https://open.spotify.com/track/4PTG3Z6ehGkBF3zI7YkR5C`", 
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
         return
     elif text == "🐙 Git Downloader":
         await message.reply_text(
-            "🐙 *GitHub & GitLab Downloader / دانلودر گیت* 🐙\n\n"
-            "You can download repositories, folders, files, or releases directly from GitHub/GitLab!\n\n"
+            "🐙 *Git Downloader / دانلودر گیت*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Download Repositories, Folders, Files, or Releases from GitHub & GitLab.\n\n"
             "💡 *How to use:*\n"
-            "Simply send any GitHub or GitLab repository, folder, file, or release URL directly to the bot.\n\n"
-            "📝 *Example links:*\n"
-            "• Repo: `https://github.com/owner/repo`\n"
-            "• Folder: `https://github.com/owner/repo/tree/main/src`\n"
-            "• File: `https://github.com/owner/repo/blob/main/README.md`\n"
-            "• Release: `https://github.com/owner/repo/releases`\n\n"
+            "Send the URL of any repo, folder, or file.\n\n"
+            "📝 *Examples:*\n"
+            "🔹 Repo: `https://github.com/owner/repo`\n"
+            "🔹 Folder: `.../repo/tree/main/src`\n\n"
             "🔑 *Private Repositories:*\n"
-            "If the repository is private, set your personal access token first:\n"
-            "• For GitHub: `/github_token ghp_your_token_here`\n"
-            "• For GitLab: `/gitlab_token glpat-your_token_here` (or use `clear` to delete)",
+            "Use `/github_token <your_token>` or `/gitlab_token <your_token>` to set your access.",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
         return
     elif text == "📥 Direct Link Downloader":
         await message.reply_text(
-            "📥 *Direct Link Downloader / دانلودر لینک مستقیم* 📥\n\n"
-            "You can download any file from the internet by sending its direct download link to the bot.\n\n"
+            "📥 *Direct Downloader / دانلود لینک مستقیم*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Download any file from the web seamlessly.\n\n"
             "💡 *How to use:*\n"
-            "1️⃣ **Method 1:** Send the direct link to the file. If it has a standard extension (like `.zip`, `.pdf`, `.mp4`), the bot will download it automatically.\n\n"
-            "2️⃣ **Method 2:** Use the `/direct` command to force download any link directly (even if it doesn't end with a file extension).\n\n"
-            "📝 *Syntax:* `/direct <url> [--name custom_filename.ext]`\n"
-            "• *Example:* `/direct https://example.com/data --name info.zip`",
+            "1️⃣ Send the direct file link. (like `.zip`, `.mp4`)\n"
+            "2️⃣ Or force download any link using the command below:\n\n"
+            "⌨️ *Usage:* `/direct <url> [--name custom_name.ext]`\n"
+            "📌 *Example:* `/direct https://example.com/data --name info.zip`",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
         return
     elif text == "🔄 File Converter":
-        await message.reply_text("🔄 *File Converter / مبدل فایل*\n\nSimply send any document, image, or audio file directly to the bot. The bot will automatically analyze the format and present conversion options!\n\n*Supported conversions:*\n ├─ *Images:* PNG, JPG, WebP, PDF\n ├─ *Audios:* MP3, WAV, OGG\n └─ *Documents:* DOCX to PDF, PDF to Text (.txt)", parse_mode="Markdown")
+        await message.reply_text(
+            "🔄 *File Converter / مبدل قدرتمند فرمت‌ها*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "I can convert almost anything! Just forward or upload a file directly to me.\n\n"
+            "🎨 *Images:* PNG, JPG, WebP, PDF\n"
+            "🎧 *Audio:* MP3, WAV, OGG, Voice Effects\n"
+            "🎥 *Video:* Extract MP3, GIF, Compress\n"
+            "📄 *Docs:* DOCX to PDF, PDF to Text, Unlock PDF", 
+            parse_mode="Markdown"
+        )
         return
     elif text == "🤖 AI Chat":
         keyboard = [
@@ -2636,9 +2666,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await message.reply_text(
-            "🤖 *AI Chat / چت با هوش مصنوعی*\n\n"
-            "Please select which AI engine you want to use for your next messages:\n"
-            "لطفا هوش مصنوعی مورد نظر خود را برای مکالمه انتخاب کنید:", 
+            "🤖 *AI Assistant / دستیار هوشمند*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Choose your preferred AI Engine below.\n"
+            "لطفاً موتور هوش مصنوعی خود را برای مکالمه انتخاب کنید:", 
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
