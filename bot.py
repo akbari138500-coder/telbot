@@ -353,6 +353,7 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
         proxy_url = get_proxy_url()
         if proxy_url:
             cmd += ["--proxy", proxy_url]
+        cmd += ["--extractor-args", "youtube:player_client=android,web"]
         cmd.append(url)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
@@ -1093,7 +1094,7 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "allsubtitles": False,
         "subtitleslangs": ["en", "fa"],
         "http_headers": site_opts.pop("http_headers", base_headers),
-        "extractor_args": {"youtube": {"skip": ["translated_subs"]}},
+        "extractor_args": {"youtube": {"skip": ["translated_subs"], "player_client": ["android", "web"]}},
         **get_ydl_cookie_opts(),
         **site_opts,
     }
@@ -1721,7 +1722,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             KeyboardButton("📥 Direct Link Downloader")
         ],
         [
-            KeyboardButton("📊 Statistics"),
+            KeyboardButton("🤖 AI Chat"),
+            KeyboardButton("📊 Statistics")
+        ],
+        [
             KeyboardButton("❓ Help & Guide")
         ]
     ]
@@ -1737,6 +1741,7 @@ def run_youtube_search(query, page=1):
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': True,
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
         **get_ydl_cookie_opts(),
         **get_site_specific_opts(search_url),
     }
@@ -2445,6 +2450,30 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def query_gemini(prompt: str) -> str:
+    import aiohttp
+    import os
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "⚠️ AI Error: GEMINI_API_KEY is not set in .env file."
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    proxy_url = get_proxy_url()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, proxy=proxy_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "No response")
+                return f"⚠️ AI Error: {resp.status}"
+    except Exception as e:
+        return f"⚠️ AI Error: {e}"
+
 # =====================================================================
 # Main Message Handler (Inputs & Routing)
 # =====================================================================
@@ -2559,6 +2588,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🔄 File Converter":
         await message.reply_text("🔄 *File Converter / مبدل فایل*\n\nSimply send any document, image, or audio file directly to the bot. The bot will automatically analyze the format and present conversion options!\n\n*Supported conversions:*\n ├─ *Images:* PNG, JPG, WebP, PDF\n ├─ *Audios:* MP3, WAV, OGG\n └─ *Documents:* DOCX to PDF, PDF to Text (.txt)", parse_mode="Markdown")
         return
+    elif text == "🤖 AI Chat":
+        await message.reply_text("🤖 *AI Chat / چت با هوش مصنوعی*\n\nJust send me any text message (without a link) and I will answer it using Gemini AI!\n\n*Example:* `Write a python script to sort an array.`", parse_mode="Markdown")
+        return
     elif text == "📊 Statistics":
         await stats_command(update, context)
         return
@@ -2636,7 +2668,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             urls.append(url_match.group(0))
 
     if not urls:
-        await message.reply_text("❌ Please send a valid link, a file to convert, or use `/search <query>`.")
+        status_msg = await message.reply_text("🤖 *Thinking... / در حال پردازش*", parse_mode="Markdown")
+        try:
+            await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+        except Exception:
+            pass
+        response = await query_gemini(text)
+        
+        # Format Gemini's Markdown to be more compatible with Telegram's legacy Markdown
+        import re
+        formatted_text = response
+        formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text) # Convert **bold** to *bold*
+        formatted_text = re.sub(r'^###\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+        formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+        formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+        
+        final_msg = f"✨ *Gemini AI*\n{DIVIDER}\n{formatted_text}"
+        
+        try:
+            await status_msg.edit_text(final_msg, parse_mode="Markdown")
+        except Exception as e:
+            # Fallback to plain text if Telegram markdown parser fails (due to unclosed tags)
+            plain_msg = f"✨ Gemini AI\n{DIVIDER}\n{response}"
+            await status_msg.edit_text(plain_msg)
         return
 
     raw_url = urls[0]
@@ -4426,6 +4480,7 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': True,
+                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
