@@ -3211,6 +3211,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success, detail = await upload_to_techpulse(filepath, custom_filename=filename)
         if success:
             await status_msg.edit_text(f"✅ فایل `{filename}` با موفقیت روی سایت آپلود شد!")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
         else:
             await status_msg.edit_text(f"❌ آپلود فایل شکست خورد: `{detail}`")
         return
