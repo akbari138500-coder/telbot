@@ -2483,6 +2483,37 @@ async def query_gemini(prompt: str) -> str:
     except Exception as e:
         return f"⚠️ AI Error: {e}"
 
+async def query_agentrouter(prompt: str) -> str:
+    import aiohttp
+    import os
+    api_key = os.getenv("AGENTROUTER_API_KEY")
+    if not api_key:
+        return "⚠️ AI Error: AGENTROUTER_API_KEY is not set in .env file."
+    
+    url = "https://api.agentrouter.org/v1/chat/completions"
+    payload = {
+        "model": "opus-4.6",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    proxy_url = get_proxy_url()
+    try:
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.post(url, json=payload, headers=headers, proxy=proxy_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        return choices[0].get("message", {}).get("content", "No response")
+                text_err = await resp.text()
+                return f"⚠️ AI Error {resp.status}: {text_err[:100]}"
+    except Exception as e:
+        return f"⚠️ AI Error: {e}"
+
 # =====================================================================
 # Main Message Handler (Inputs & Routing)
 # =====================================================================
@@ -2598,7 +2629,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("🔄 *File Converter / مبدل فایل*\n\nSimply send any document, image, or audio file directly to the bot. The bot will automatically analyze the format and present conversion options!\n\n*Supported conversions:*\n ├─ *Images:* PNG, JPG, WebP, PDF\n ├─ *Audios:* MP3, WAV, OGG\n └─ *Documents:* DOCX to PDF, PDF to Text (.txt)", parse_mode="Markdown")
         return
     elif text == "🤖 AI Chat":
-        await message.reply_text("🤖 *AI Chat / چت با هوش مصنوعی*\n\nJust send me any text message (without a link) and I will answer it using Gemini AI!\n\n*Example:* `Write a python script to sort an array.`", parse_mode="Markdown")
+        keyboard = [
+            [
+                InlineKeyboardButton("✨ Google Gemini", callback_data="ai_engine:gemini"),
+                InlineKeyboardButton("🧠 Opus 4.6", callback_data="ai_engine:opus")
+            ]
+        ]
+        await message.reply_text(
+            "🤖 *AI Chat / چت با هوش مصنوعی*\n\n"
+            "Please select which AI engine you want to use for your next messages:\n"
+            "لطفا هوش مصنوعی مورد نظر خود را برای مکالمه انتخاب کنید:", 
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
         return
     elif text == "📊 Statistics":
         await stats_command(update, context)
@@ -2677,12 +2720,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             urls.append(url_match.group(0))
 
     if not urls:
-        status_msg = await message.reply_text("🤖 *Thinking... / در حال پردازش*", parse_mode="Markdown")
+        engine = USER_STATES.get(user_id, {}).get("ai_engine", "gemini")
+        engine_name = "Gemini" if engine == "gemini" else "Opus 4.6"
+        status_msg = await message.reply_text(f"🤖 *Thinking ({engine_name})... / در حال پردازش*", parse_mode="Markdown")
         try:
             await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
         except Exception:
             pass
-        response = await query_gemini(text)
+            
+        if engine == "opus":
+            response = await query_agentrouter(text)
+        else:
+            response = await query_gemini(text)
         
         # Format Gemini's Markdown to be more compatible with Telegram's legacy Markdown
         import re
@@ -2692,13 +2741,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
         formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
         
-        final_msg = f"✨ *Gemini AI*\n{DIVIDER}\n{formatted_text}"
+        final_msg = f"✨ *{engine_name} AI*\n{DIVIDER}\n{formatted_text}"
         
         try:
             await status_msg.edit_text(final_msg, parse_mode="Markdown")
         except Exception as e:
             # Fallback to plain text if Telegram markdown parser fails (due to unclosed tags)
-            plain_msg = f"✨ Gemini AI\n{DIVIDER}\n{response}"
+            plain_msg = f"✨ {engine_name} AI\n{DIVIDER}\n{response}"
             await status_msg.edit_text(plain_msg)
         return
 
@@ -3254,6 +3303,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = data[0]
 
     # Handle TechPulse Upload Option Callback
+    if action == "ai_engine":
+        engine = data[1]
+        if user_id not in USER_STATES:
+            USER_STATES[user_id] = {}
+        USER_STATES[user_id]['ai_engine'] = engine
+        engine_name = "✨ Google Gemini" if engine == "gemini" else "🧠 Opus 4.6 (AgentRouter)"
+        await query.message.edit_text(
+            f"✅ AI Engine set to: *{engine_name}*\n\n"
+            f"Now send me any text message to chat! / برای شروع مکالمه یک متن ارسال کنید:",
+            parse_mode="Markdown"
+        )
+        return
+
     if action == "tp_upload":
         unique_id = data[1]
         cached_info = UPLOAD_CACHE.get(unique_id)
