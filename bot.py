@@ -2902,6 +2902,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
+                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
