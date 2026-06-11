@@ -325,9 +325,12 @@ def get_site_specific_opts(url: str) -> dict:
     This is the fix recommended in yt-dlp issue tracker for PornHub 403.
     """
     if is_impersonate_site(url) and _HAS_IMPERSONATE:
-        return {
-            "impersonate": "chrome",  # Mimic a real Chrome browser request
-        }
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            target = ImpersonateTarget.from_str("chrome")
+            return {"impersonate": target}
+        except Exception:
+            return {"impersonate": "chrome"}
     return {}
 
 
@@ -593,56 +596,160 @@ async def search_youtube_invidious(query: str) -> str | None:
     return None
 
 async def fetch_spotify_metadata(url):
-    """Fetches track metadata from public Spotify page without API keys."""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    proxy_url = get_proxy_url()
-    async with aiohttp.ClientSession(headers=headers) as session:
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    # Extract Title
-                    title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
-                    title = unquote(title_match.group(1)) if title_match else None
-                    
-                    # Extract Image
-                    image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
-                    image = image_match.group(1) if image_match else None
-                    
-                    # Extract Description (contains Artist info)
-                    desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
-                    desc = unquote(desc_match.group(1)) if desc_match else ""
-                    
-                    artist = "Unknown Artist"
-                    if " · " in desc:
-                        parts = desc.split(" · ")
-                        if parts[0].startswith("Song by "):
-                            artist = parts[0].replace("Song by ", "")
-                        elif len(parts) > 1 and "by " in parts[0]:
-                            artist = parts[0].split("by ")[-1]
-                    elif "by " in desc:
-                        artist = desc.split("by ")[-1]
-                        
-                    # Fallback to Title tag parsing
-                    if not title:
-                        h_title_match = re.search(r'<title>([^<]+)</title>', html)
-                        if h_title_match:
-                            h_title = h_title_match.group(1)
-                            if " | Spotify" in h_title:
-                                h_title = h_title.replace(" | Spotify", "")
-                            if " - song by " in h_title.lower():
-                                title, artist = re.split(r' - song by ', h_title, flags=re.IGNORECASE)
-                            else:
-                                title = h_title
-                                
-                    return {
-                        "title": (title or "Spotify Track").strip(),
-                        "artist": (artist or "Unknown Artist").strip(),
-                        "thumbnail": image
-                    }
-        except Exception as e:
-            logger.error(f"Spotify metadata fetch failed: {e}")
+    """Fetches track metadata from public Spotify page with robust tls-client scraper & fallbacks."""
+    # Try SpotipyFree first (as requested)
+    try:
+        from SpotipyFree import Spotify
+        sp = Spotify()
+        # Extract track ID
+        import re
+        m = re.search(r'/track/([a-zA-Z0-9]+)', url)
+        if m:
+            track_id = m.group(1)
+            logger.info(f"Trying SpotipyFree for ID: {track_id}")
+            track_info = sp.track(track_id)
+            logger.info("SpotipyFree Succeeded!")
+            return {
+                "title": track_info.get("name"),
+                "artist": track_info.get("artists", [{}])[0].get("name", "Unknown Artist"),
+                "thumbnail": track_info.get("album", {}).get("images", [{}])[0].get("url")
+            }
+    except Exception as e:
+        logger.warning(f"SpotipyFree failed, falling back: {e}")
+        
+    # Fallback to our robust tls_client scraper
+    import tls_client
+    import json
+    from urllib.parse import urlparse, unquote
+    
+    track_id = None
+    parsed = urlparse(url)
+    path_parts = parsed.path.strip("/").split("/")
+    if "track" in path_parts:
+        idx = path_parts.index("track")
+        if idx + 1 < len(path_parts):
+            track_id = path_parts[idx + 1].split("?")[0]
+    if not track_id:
+        import re
+        m = re.search(r'/track/([a-zA-Z0-9]+)', url)
+        if m:
+            track_id = m.group(1)
+            
+    if not track_id:
+        return None
+        
+    proxy = get_proxy_url()
+    session = tls_client.Session(client_identifier="chrome_120", random_tls_extension_order=True)
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
+        
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://open.spotify.com/"
+    }
+    
+    # Method 1: Embed page JSON
+    try:
+        embed_url = f"https://open.spotify.com/embed/track/{track_id}"
+        resp = session.get(embed_url, headers=headers)
+        if resp.status_code == 200:
+            import re
+            m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', resp.text)
+            if m:
+                data = json.loads(m.group(1))
+                state_data = data.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {})
+                entity = state_data.get("entity", {})
+                if entity and entity.get("type") == "track":
+                    title = entity.get("title") or entity.get("name")
+                    artists = entity.get("artists", [])
+                    artist = artists[0].get("name") if artists else "Unknown Artist"
+                    images = entity.get("visualIdentity", {}).get("image", [])
+                    thumbnail = None
+                    if images:
+                        sorted_images = sorted(images, key=lambda x: x.get("maxWidth", 0), reverse=True)
+                        thumbnail = sorted_images[0].get("url")
+                    return {"title": title, "artist": artist, "thumbnail": thumbnail}
+    except Exception as e:
+        logger.error(f"Embed page parsing failed: {e}")
+        
+    # Method 2: oEmbed API
+    try:
+        import urllib.parse
+        oembed_url = f"https://open.spotify.com/oembed?url={urllib.parse.quote(url)}"
+        resp = session.get(oembed_url, headers=headers)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "title": data.get("title"),
+                "artist": "Unknown Artist",
+                "thumbnail": data.get("thumbnail_url")
+            }
+    except Exception as e:
+        logger.error(f"oEmbed failed: {e}")
+        
+    # Method 3: og tags on main page
+    try:
+        resp = session.get(url, headers=headers)
+        if resp.status_code == 200:
+            html = resp.text
+            import re
+            title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+            title = unquote(title_match.group(1)) if title_match else None
+            image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+            image = image_match.group(1) if image_match else None
+            desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+            desc = unquote(desc_match.group(1)) if desc_match else ""
+            artist = "Unknown Artist"
+            if " · " in desc:
+                parts = desc.split(" · ")
+                if parts[0].startswith("Song by "):
+                    artist = parts[0].replace("Song by ", "")
+                elif len(parts) > 1 and "by " in parts[0]:
+                    artist = parts[0].split("by ")[-1]
+            elif "by " in desc:
+                artist = desc.split("by ")[-1]
+            if title:
+                return {"title": title, "artist": artist, "thumbnail": image}
+    except Exception as e:
+        logger.error(f"Main page parsing failed: {e}")
+        
     return None
+
+async def upload_to_techpulse(filepath, custom_filename=None):
+    """Programmatically uploads a local file to the TechPulse Uploader API."""
+    url = os.getenv("TECHPULSE_UPLOAD_URL", "http://localhost:3000/api/uploads")
+    filename = custom_filename or os.path.basename(filepath)
+    
+    import mimetypes
+    mime_type, _ = mimetypes.guess_type(filepath)
+    if not mime_type:
+        mime_type = 'application/octet-stream'
+        
+    logger.info(f"Uploading {filename} ({mime_type}) to TechPulse: {url}")
+    try:
+        data = aiohttp.FormData()
+        data.add_field(
+            'file',
+            open(filepath, 'rb'),
+            filename=filename,
+            content_type=mime_type
+        )
+        data.add_field('category', 'دانلود بات')
+        data.add_field('ownerId', 'downloader_bot')
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data, timeout=120) as resp:
+                if resp.status in (200, 201):
+                    res_json = await resp.json()
+                    logger.info(f"TechPulse upload succeeded: {res_json}")
+                    return True, "Success"
+                else:
+                    res_text = await resp.text()
+                    logger.error(f"TechPulse upload failed: status={resp.status}, response={res_text}")
+                    return False, f"Status {resp.status}"
+    except Exception as e:
+        logger.error(f"TechPulse upload exception: {e}")
+        return False, str(e)
 
 async def download_thumbnail(url, dest_dir):
     """Downloads video thumbnail in the background."""
@@ -1385,6 +1492,15 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
             
             if sent_msg:
                 await setup_cloud_button(bot, chat_id, sent_msg.message_id)
+                try:
+                    tp_status = await bot.send_message(chat_id=chat_id, text="☁️ *Uploading file to TechPulse...*", parse_mode="Markdown")
+                    success, detail = await upload_to_techpulse(filepath)
+                    if success:
+                        await tp_status.edit_text("✅ *File uploaded to TechPulse successfully!*")
+                    else:
+                        await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                except Exception as ex:
+                    logger.error(f"Failed to trigger TechPulse upload: {ex}")
                 
         except Exception as e:
             await status_msg.edit_text(f"❌ *Failed to upload:* {str(e)}")
@@ -1487,6 +1603,15 @@ async def send_file_to_telegram(bot, chat_id, filepath, reply_to_message_id, thu
                 parse_mode="Markdown",
             )
             await status_msg.delete()
+            try:
+                tp_status = await bot.send_message(chat_id=chat_id, text="☁️ *Uploading original unsplit file to TechPulse...*", parse_mode="Markdown")
+                success, detail = await upload_to_techpulse(filepath)
+                if success:
+                    await tp_status.edit_text("✅ *Original file uploaded to TechPulse successfully!*")
+                else:
+                    await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+            except Exception as ex:
+                logger.error(f"Failed to trigger TechPulse upload: {ex}")
         except Exception as e:
             await status_msg.edit_text(f"❌ *Error during split upload:* {str(e)}")
             raise e
@@ -2001,71 +2126,219 @@ async def download_gitlab_folder_recursive(session, owner, repo, path, branch, l
                     async with aiofiles.open(local_item_path, "wb") as f:
                         await f.write(await file_resp.read())
 
+async def fetch_git_branches(platform, owner, repo, token=None):
+    """Fetches branches from GitHub or GitLab API."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    proxy_url = get_proxy_url()
+    
+    if platform == "github":
+        headers["Accept"] = "application/vnd.github.v3+json"
+        if token:
+            headers["Authorization"] = f"token {token}"
+        url = f"https://api.github.com/repos/{owner}/{repo}/branches"
+    else:
+        if token:
+            headers["PRIVATE-TOKEN"] = token
+        import urllib.parse
+        project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+        url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
+        
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, proxy=proxy_url, timeout=15) as resp:
+                if resp.status == 200:
+                    branches_data = await resp.json()
+                    return [b.get("name") for b in branches_data]
+    except Exception as e:
+        logger.error(f"Failed to fetch branches: {e}")
+    return []
+
+async def render_git_explorer(message, url_id, user_id, edit=True):
+    """Renders the interactive explorer keyboard for Git repositories."""
+    cached = URL_CACHE.get(url_id)
+    if not cached:
+        return
+        
+    platform = cached['platform']
+    owner = cached['owner']
+    repo = cached['repo']
+    branch = cached.get('branch')
+    path = cached.get('path', "")
+    page = cached.get('page', 0)
+    
+    gh_token, gl_token = db.get_tokens(user_id)
+    token = gh_token if platform == "github" else gl_token
+    
+    # 1. Fetch default branch if None
+    if not branch:
+        default_branch = "main"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        proxy_url = get_proxy_url()
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                if platform == "github":
+                    headers["Accept"] = "application/vnd.github.v3+json"
+                    if token:
+                        headers["Authorization"] = f"token {token}"
+                    url = f"https://api.github.com/repos/{owner}/{repo}"
+                    async with session.get(url, proxy=proxy_url, timeout=10) as r:
+                        if r.status == 200:
+                            repo_info = await r.json()
+                            default_branch = repo_info.get("default_branch", "main")
+                else:
+                    if token:
+                        headers["PRIVATE-TOKEN"] = token
+                    import urllib.parse
+                    project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+                    url = f"https://gitlab.com/api/v4/projects/{project_id}"
+                    async with session.get(url, proxy=proxy_url, timeout=10) as r:
+                        if r.status == 200:
+                            repo_info = await r.json()
+                            default_branch = repo_info.get("default_branch", "master")
+        except Exception as e:
+            logger.error(f"Failed to fetch repo default branch: {e}")
+        branch = default_branch
+        cached['branch'] = branch
+
+    # 2. Fetch contents of current path
+    items = []
+    error_msg = None
+    headers = {"User-Agent": "Mozilla/5.0"}
+    proxy_url = get_proxy_url()
+    
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            if platform == "github":
+                headers["Accept"] = "application/vnd.github.v3+json"
+                if token:
+                    headers["Authorization"] = f"token {token}"
+                url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+                params = {"ref": branch}
+                async with session.get(url, params=params, proxy=proxy_url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, dict):
+                            data = [data]
+                        for item in data:
+                            items.append({
+                                'name': item.get('name'),
+                                'type': item.get('type'), # 'dir' or 'file'
+                                'path': item.get('path'),
+                                'download_url': item.get('download_url')
+                            })
+                    else:
+                        error_msg = f"HTTP {resp.status}"
+            else:
+                if token:
+                    headers["PRIVATE-TOKEN"] = token
+                import urllib.parse
+                project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+                url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/tree"
+                params = {"path": path, "ref": branch}
+                async with session.get(url, params=params, proxy=proxy_url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for item in data:
+                            item_type = 'dir' if item.get('type') == 'tree' else 'file'
+                            items.append({
+                                'name': item.get('name'),
+                                'type': item_type,
+                                'path': item.get('path'),
+                                'download_url': None
+                            })
+                    else:
+                        error_msg = f"HTTP {resp.status}"
+    except Exception as e:
+        logger.error(f"Failed to fetch contents: {e}")
+        error_msg = str(e)
+
+    items.sort(key=lambda x: (0 if x['type'] == 'dir' else 1, x['name'].lower()))
+    cached['items'] = items
+
+    text = (
+        f"🐙 *GIT EXPLORER / اکسپلورر گیت* 🐙\n"
+        f"{DIVIDER}\n"
+        f"🌐 *Platform:* `{platform.upper()}`\n"
+        f"📦 *Repository:* `{owner}/{repo}`\n"
+        f"🌿 *Branch:* `{branch}`\n"
+        f"📁 *Path:* `/{path}`\n"
+    )
+    
+    if error_msg:
+        text += f"\n❌ *Error loading contents:* `{error_msg}`\n"
+        keyboard = [
+            [InlineKeyboardButton("🌿 Change Branch", callback_data=f"gitnav:{url_id}:branches")],
+            [InlineKeyboardButton("❌ Close Explorer", callback_data=f"gitnav:{url_id}:cancel")]
+        ]
+    else:
+        ITEMS_PER_PAGE = 7
+        total_items = len(items)
+        total_pages = max(1, (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+        if page >= total_pages:
+            page = 0
+            cached['page'] = 0
+            
+        start_idx = page * ITEMS_PER_PAGE
+        end_idx = start_idx + ITEMS_PER_PAGE
+        page_items = items[start_idx:end_idx]
+        
+        keyboard = []
+        
+        if path:
+            keyboard.append([InlineKeyboardButton("⬆️ .. (Go Up / برگشت به پوشه قبل)", callback_data=f"gitnav:{url_id}:up")])
+            
+        for item_idx, item in enumerate(page_items):
+            global_idx = start_idx + item_idx
+            icon = "📁" if item['type'] == 'dir' else "📄"
+            label = f"{icon} {item['name']}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"gitnav:{url_id}:go:{global_idx}")])
+            
+        if total_pages > 1:
+            pagination_row = []
+            if page > 0:
+                pagination_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"gitnav:{url_id}:page:prev"))
+            pagination_row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="gitnav:noop"))
+            if page < total_pages - 1:
+                pagination_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"gitnav:{url_id}:page:next"))
+            keyboard.append(pagination_row)
+            
+        action_label = "📥 Download Folder (.zip)" if path else "📦 Download Repository (.zip)"
+        keyboard.append([
+            InlineKeyboardButton(action_label, callback_data=f"gitnav:{url_id}:dlzip"),
+            InlineKeyboardButton("🏷 Releases", callback_data=f"gitnav:{url_id}:releases")
+        ])
+        keyboard.append([
+            InlineKeyboardButton("🌿 Branches", callback_data=f"gitnav:{url_id}:branches"),
+            InlineKeyboardButton("❌ Close", callback_data=f"gitnav:{url_id}:cancel")
+        ])
+        
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if edit:
+        try:
+            await message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        except Exception:
+            pass
+    else:
+        await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
 async def handle_git_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, git_info):
     message = update.message
     user_id = update.effective_user.id
     
-    platform = git_info['platform']
-    owner = git_info['owner']
-    repo = git_info['repo']
-    item_type = git_info['type']
-    branch = git_info['branch']
-    path = git_info['path']
-    
     url_id = uuid.uuid4().hex[:8]
     URL_CACHE[url_id] = {
         'is_git': True,
-        'git_info': git_info
+        'git_info': git_info,
+        'platform': git_info['platform'],
+        'owner': git_info['owner'],
+        'repo': git_info['repo'],
+        'branch': git_info['branch'],
+        'path': git_info['path'] or "",
+        'page': 0
     }
     
-    text = (
-        f"🤖 *GIT DOWNLOADER / دانلودر گیت* 🤖\n"
-        f"{DIVIDER}\n"
-        f"🌐 *Platform:* `{platform.upper()}`\n"
-        f"👤 *Owner:* `{owner}`\n"
-        f"📦 *Repository:* `{repo}`\n"
-        f"📂 *Type:* `{item_type.upper()}`\n"
-    )
-    if branch:
-        text += f"🌿 *Branch:* `{branch}`\n"
-    if path:
-        text += f"📁 *Path:* `{path}`\n"
-        
-    gh_token, gl_token = db.get_tokens(user_id)
-    has_token = bool(gh_token if platform == "github" else gl_token)
-    
-    if has_token:
-        text += "🔑 *Auth:* Stored Token will be used.\n"
-    else:
-        text += "🔓 *Auth:* Public request (Use `/github_token` or `/gitlab_token` to set tokens for private repos).\n"
-        
-    keyboard = []
-    
-    if item_type == "repo":
-        keyboard.append([
-            InlineKeyboardButton("📦 Download Repo (.zip)", callback_data=f"gitdl:{url_id}:repo"),
-            InlineKeyboardButton("🏷 List Releases", callback_data=f"gitdl:{url_id}:releases")
-        ])
-    elif item_type == "folder":
-        keyboard.append([
-            InlineKeyboardButton("📁 Download Folder (.zip)", callback_data=f"gitdl:{url_id}:folder")
-        ])
-    elif item_type == "file":
-        keyboard.append([
-            InlineKeyboardButton("📄 Download File", callback_data=f"gitdl:{url_id}:file")
-        ])
-    elif item_type in ("releases", "release_tag"):
-        keyboard.append([
-            InlineKeyboardButton("🏷 List Release Assets", callback_data=f"gitdl:{url_id}:releases")
-        ])
-        
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"gitdl:{url_id}:cancel")])
-    
-    await message.reply_text(
-        text + "\n👇 *Choose download option:*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    await render_git_explorer(message, url_id, user_id, edit=False)
 
 async def github_token_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -2424,13 +2697,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     is_media_domain = any(domain in parsed.netloc.lower() for domain in media_domains)
     
-    # Determine if it's likely a direct static file
-    is_direct_file = False
-    if any(path.endswith(ext) for ext in direct_file_extensions) and not is_streaming:
-        is_direct_file = True
-
-    # Use yt-dlp if it's a media domain, streaming format, or not a direct file link
-    use_ytdlp = is_media_domain or is_streaming or not is_direct_file
+    # Use yt-dlp only for media domains and streaming content
+    use_ytdlp = is_media_domain or is_streaming
 
     if use_ytdlp:
         await status_msg.edit_text("🔍 *Extracting media info... / دریافت اطلاعات*", parse_mode="Markdown")
@@ -2871,6 +3139,269 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = query.data.split(":")
     action = data[0]
+
+    # Handle GitHub & GitLab Interactive Explorer Navigation
+    if action == "gitnav":
+        url_id = data[1]
+        sub_action = data[2]
+        
+        cached = URL_CACHE.get(url_id)
+        if not cached or not cached.get('is_git'):
+            await query.answer("❌ Session expired. Please send link again.", show_alert=True)
+            return
+            
+        git_info = cached['git_info']
+        platform = git_info['platform']
+        owner = git_info['owner']
+        repo = git_info['repo']
+        branch = cached.get('branch')
+        path = cached.get('path', "")
+        page = cached.get('page', 0)
+        
+        gh_token, gl_token = db.get_tokens(user_id)
+        token = gh_token if platform == "github" else gl_token
+        
+        if sub_action == "cancel":
+            await query.delete_message()
+            URL_CACHE.pop(url_id, None)
+            return
+            
+        elif sub_action == "go":
+            idx = int(data[3])
+            items = cached.get('items', [])
+            if idx >= len(items):
+                await query.answer("❌ Item not found.")
+                return
+            item = items[idx]
+            if item['type'] == 'dir':
+                cached['path'] = item['path']
+                cached['page'] = 0
+                await query.answer(f"Navigating to {item['name']}...")
+                await render_git_explorer(query.message, url_id, user_id, edit=True)
+                return
+            else:
+                sub_action = "dlfile"
+            
+        elif sub_action == "up":
+            if path:
+                parts = path.strip("/").split("/")
+                if len(parts) > 1:
+                    cached['path'] = "/".join(parts[:-1])
+                else:
+                    cached['path'] = ""
+                cached['page'] = 0
+                await query.answer("Going up...")
+                await render_git_explorer(query.message, url_id, user_id, edit=True)
+            return
+            
+        elif sub_action == "page":
+            direction = data[3]
+            if direction == "prev" and page > 0:
+                cached['page'] = page - 1
+            elif direction == "next":
+                cached['page'] = page + 1
+            await render_git_explorer(query.message, url_id, user_id, edit=True)
+            return
+            
+        elif sub_action == "branches":
+            await query.answer("Fetching branches...")
+            branches = await fetch_git_branches(platform, owner, repo, token)
+            if not branches:
+                await query.answer("❌ Failed to fetch branches.", show_alert=True)
+                return
+            cached['branches'] = branches
+            
+            keyboard = []
+            for b_idx, b_name in enumerate(branches):
+                keyboard.append([InlineKeyboardButton(f"🌿 {b_name}", callback_data=f"gitnav:{url_id}:setbranch:{b_idx}")])
+            keyboard.append([InlineKeyboardButton("⬅️ Back to Explorer", callback_data=f"gitnav:{url_id}:back")])
+            
+            await query.edit_message_text(
+                f"🌿 *BRANCHES / شاخه‌های مخزن* `{repo}`\nSelect a branch to explore:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            return
+            
+        elif sub_action == "setbranch":
+            b_idx = int(data[3])
+            branches = cached.get('branches', [])
+            if b_idx >= len(branches):
+                await query.answer("❌ Branch not found.")
+                return
+            cached['branch'] = branches[b_idx]
+            cached['page'] = 0
+            cached['path'] = ""
+            await query.answer(f"Switched branch to {branches[b_idx]}!")
+            await render_git_explorer(query.message, url_id, user_id, edit=True)
+            return
+            
+        elif sub_action == "back":
+            await render_git_explorer(query.message, url_id, user_id, edit=True)
+            return
+            
+        elif sub_action == "releases":
+            # Delegate to existing releases callback
+            query.data = f"gitdl:{url_id}:releases"
+            data = query.data.split(":")
+            action = "gitdl"
+            choice = "releases"
+            # Fall through to gitdl code
+            
+        elif sub_action == "dlzip":
+            async def git_zip_download_task():
+                status_msg = await query.message.reply_text("🚀 *Git download task started...*")
+                try:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        bot_obj = query.message.get_bot()
+                        chat_id = query.message.chat_id
+                        
+                        if not path:
+                            await status_msg.edit_text("📥 *Downloading Repository ZIP...*")
+                            zip_file = os.path.join(temp_dir, f"{repo}.zip")
+                            
+                            if platform == "github":
+                                dl_url = f"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}"
+                                headers = {"Authorization": f"token {token}"} if token else {}
+                            else:
+                                import urllib.parse
+                                project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+                                dl_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/archive.zip"
+                                if branch:
+                                    dl_url += f"?sha={branch}"
+                                headers = {"PRIVATE-TOKEN": token} if token else {}
+                                
+                            proxy_url = get_proxy_url()
+                            async with aiohttp.ClientSession(headers=headers) as session:
+                                async with session.get(dl_url, allow_redirects=True, proxy=proxy_url) as resp:
+                                    if resp.status != 200:
+                                        await status_msg.edit_text(f"❌ Failed to download zip: HTTP {resp.status}")
+                                        return
+                                    with open(zip_file, "wb") as f:
+                                        f.write(await resp.read())
+                                        
+                            await status_msg.edit_text("📤 *Uploading Repository ZIP to Telegram...*")
+                            file_size = os.path.getsize(zip_file)
+                            db.log_download(user_id, "git_repo", file_size)
+                            
+                            with open(zip_file, "rb") as f:
+                                await bot_obj.send_document(chat_id=chat_id, document=f, filename=f"{repo}.zip")
+                            await status_msg.delete()
+                            
+                            # Upload ZIP to TechPulse
+                            tp_status = await bot_obj.send_message(chat_id=chat_id, text="☁️ *Uploading ZIP to TechPulse...*", parse_mode="Markdown")
+                            success, detail = await upload_to_techpulse(zip_file)
+                            if success:
+                                await tp_status.edit_text("✅ *ZIP uploaded to TechPulse successfully!*")
+                            else:
+                                await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                        else:
+                            folder_name = os.path.basename(path)
+                            await status_msg.edit_text(f"📥 *Downloading Folder contents:* `{folder_name}`...")
+                            local_folder_dir = os.path.join(temp_dir, folder_name)
+                            os.makedirs(local_folder_dir, exist_ok=True)
+                            
+                            async with aiohttp.ClientSession() as session:
+                                if platform == "github":
+                                    await download_github_folder_recursive(
+                                        session, owner, repo, path, branch, local_folder_dir, token
+                                    )
+                                else:
+                                    await download_gitlab_folder_recursive(
+                                        session, owner, repo, path, branch, local_folder_dir, token
+                                    )
+                                    
+                            import shutil
+                            zip_output_path = os.path.join(temp_dir, folder_name)
+                            await status_msg.edit_text("📦 *Compressing folder...*")
+                            shutil.make_archive(zip_output_path, 'zip', local_folder_dir)
+                            final_zip = zip_output_path + ".zip"
+                            
+                            await status_msg.edit_text("📤 *Uploading Folder ZIP to Telegram...*")
+                            file_size = os.path.getsize(final_zip)
+                            db.log_download(user_id, "git_folder", file_size)
+                            
+                            with open(final_zip, "rb") as f:
+                                await bot_obj.send_document(chat_id=chat_id, document=f, filename=f"{folder_name}.zip")
+                            await status_msg.delete()
+                            
+                            # Upload ZIP to TechPulse
+                            tp_status = await bot_obj.send_message(chat_id=chat_id, text="☁️ *Uploading ZIP to TechPulse...*", parse_mode="Markdown")
+                            success, detail = await upload_to_techpulse(final_zip)
+                            if success:
+                                await tp_status.edit_text("✅ *ZIP uploaded to TechPulse successfully!*")
+                            else:
+                                await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                except Exception as e:
+                    logger.error(f"Git ZIP download failed: {e}")
+                    await query.message.reply_text(f"❌ *Git download failed:* `{str(e)[:150]}`")
+            await download_queue.put(git_zip_download_task)
+            await query.answer("Enqueued ZIP download!")
+            return
+            
+        elif sub_action == "dlfile":
+            idx = int(data[3])
+            items = cached.get('items', [])
+            if idx >= len(items):
+                await query.answer("❌ File not found.")
+                return
+            item = items[idx]
+            
+            async def git_file_download_task():
+                status_msg = await query.message.reply_text(f"📥 *Downloading File:* `{item['name']}`...", parse_mode="Markdown")
+                try:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        dest_file = os.path.join(temp_dir, item['name'])
+                        proxy_url = get_proxy_url()
+                        
+                        if platform == "github":
+                            dl_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{item['path']}"
+                            headers = {"Accept": "application/vnd.github.v3.raw"}
+                            if token:
+                                headers["Authorization"] = f"token {token}"
+                            params = {"ref": branch} if branch else {}
+                        else:
+                            import urllib.parse
+                            project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
+                            enc_path = urllib.parse.quote_plus(item['path'])
+                            dl_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/files/{enc_path}/raw"
+                            headers = {"PRIVATE-TOKEN": token} if token else {}
+                            params = {"ref": branch} if branch else {}
+                            
+                        async with aiohttp.ClientSession(headers=headers) as session:
+                            async with session.get(dl_url, params=params, proxy=proxy_url) as resp:
+                                if resp.status != 200:
+                                    await status_msg.edit_text(f"❌ Failed to download file: HTTP {resp.status}")
+                                    return
+                                with open(dest_file, "wb") as f:
+                                    f.write(await resp.read())
+                                    
+                        await status_msg.edit_text("📤 *Uploading File to Telegram...*")
+                        file_size = os.path.getsize(dest_file)
+                        db.log_download(user_id, "git_file", file_size)
+                        
+                        with open(dest_file, "rb") as f:
+                            await query.message.get_bot().send_document(
+                                chat_id=query.message.chat_id,
+                                document=f,
+                                filename=item['name']
+                            )
+                        await status_msg.delete()
+                        
+                        # Upload to TechPulse automatically
+                        tp_status = await query.message.reply_text("☁️ *Uploading file to TechPulse...*")
+                        success, detail = await upload_to_techpulse(dest_file)
+                        if success:
+                            await tp_status.edit_text("✅ *File uploaded to TechPulse successfully!*")
+                        else:
+                            await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                except Exception as e:
+                    logger.error(f"Git file download failed: {e}")
+                    await query.message.reply_text(f"❌ *File download failed:* `{str(e)[:150]}`")
+                    
+            await download_queue.put(git_file_download_task)
+            await query.answer("Enqueued file download!")
+            return
 
     # Handle GitHub & GitLab Downloader Actions
     if action == "gitdl":
@@ -3953,6 +4484,15 @@ async def add_conversion_to_queue(file_id, filename, target_format, message_to_r
                             reply_to_message_id=reply_id
                         )
                     await status_msg.delete()
+                    try:
+                        tp_status = await bot.send_message(chat_id=chat_id, text="☁️ *Uploading converted file to TechPulse...*", parse_mode="Markdown")
+                        success, detail = await upload_to_techpulse(output_filepath)
+                        if success:
+                            await tp_status.edit_text("✅ *Converted file uploaded to TechPulse successfully!*")
+                        else:
+                            await tp_status.edit_text(f"⚠️ *TechPulse Upload failed:* `{detail}`")
+                    except Exception as ex:
+                        logger.error(f"Failed to trigger TechPulse upload: {ex}")
                 else:
                     await status_msg.edit_text("❌ *Conversion failed.* Could not build output file.")
         except Exception as e:
