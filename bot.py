@@ -3543,13 +3543,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     
                             import shutil
 
-try:
-    import imageio_ffmpeg
-    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
-except ImportError:
-    import shutil
-    FFMPEG_EXE = FFMPEG_EXE
-
                             zip_output_path = os.path.join(temp_dir, folder_name)
                             await status_msg.edit_text("📦 *Compressing folder...*")
                             shutil.make_archive(zip_output_path, 'zip', local_folder_dir)
@@ -3839,13 +3832,6 @@ except ImportError:
                                 )
                                 
                         import shutil
-
-try:
-    import imageio_ffmpeg
-    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
-except ImportError:
-    import shutil
-    FFMPEG_EXE = FFMPEG_EXE
 
                         zip_output_path = os.path.join(temp_dir, folder_name)
                         await status_msg.edit_text("📦 *Compressing folder...*")
