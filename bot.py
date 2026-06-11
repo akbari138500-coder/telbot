@@ -2682,7 +2682,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Trimming State Check
-    if user_id in USER_STATES and USER_STATES[user_id]['state'] == 'AWAITING_TRIM':
+    if user_id in USER_STATES and USER_STATES[user_id].get('state') == 'AWAITING_TRIM':
         url_id = USER_STATES[user_id]['url_id']
         cached = URL_CACHE.get(url_id)
         
