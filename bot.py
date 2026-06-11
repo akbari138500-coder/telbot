@@ -5,6 +5,14 @@ import time
 import uuid
 import json
 import shutil
+
+try:
+    import imageio_ffmpeg
+    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+except ImportError:
+    import shutil
+    FFMPEG_EXE = FFMPEG_EXE
+
 import sqlite3
 import zipfile
 import asyncio
@@ -1048,7 +1056,7 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
     2. If probe succeeds, use exact format_id; otherwise fall back to format strings
     3. format_sort guides yt-dlp toward mp4/m4a/h264 when multiple formats match
     """
-    has_ffmpeg = bool(shutil.which("ffmpeg"))
+    has_ffmpeg = bool(FFMPEG_EXE)
     audio_only = (format_opt == "audio")
     target_height = int(format_opt[:-1]) if format_opt in ("1080p", "720p", "480p", "360p") else None
 
@@ -1094,6 +1102,7 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "allsubtitles": False,
         "subtitleslangs": ["en", "fa"],
         "http_headers": site_opts.pop("http_headers", base_headers),
+        "ffmpeg_location": FFMPEG_EXE,
         "extractor_args": {"youtube": {"skip": ["translated_subs"], "player_client": ["android", "web"]}},
         **get_ydl_cookie_opts(),
         **site_opts,
@@ -1147,7 +1156,7 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
 # =====================================================================
 def split_video_ffmpeg(filepath, dest_dir, max_part_size=MAX_PART_SIZE):
     """Segments a video file into playable chunks using FFmpeg."""
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+    if not FFMPEG_EXE or not shutil.which("ffprobe"):
         return None
     try:
         file_size = os.path.getsize(filepath)
@@ -1209,7 +1218,7 @@ def split_file_binary(file_path, chunk_size):
 
 def convert_to_gif_ffmpeg(input_path, output_path):
     """Converts a short video into a high-quality looping GIF."""
-    if not shutil.which("ffmpeg"):
+    if not FFMPEG_EXE:
         return False
     try:
         # High quality palette-based GIF conversion using FFmpeg
@@ -1257,10 +1266,10 @@ async def run_file_conversion(input_path, target_format, temp_dir):
         output_ext = f".{target_format}"
         output_path = os.path.join(temp_dir, name_part + output_ext)
         
-        if not shutil.which("ffmpeg"):
+        if not FFMPEG_EXE:
             raise Exception("FFmpeg is not installed on this server. Audio conversion is unavailable.")
             
-        cmd = ["ffmpeg", "-y", "-i", input_path]
+        cmd = [FFMPEG_EXE, "-y", "-i", input_path]
         
         if target_format == "ogg":
             cmd.extend(["-c:a", "libvorbis", "-q:a", "4"])
@@ -1282,7 +1291,7 @@ async def run_file_conversion(input_path, target_format, temp_dir):
     elif target_format == "compress":
         # Video Compression using FFmpeg (libx264, medium speed, crf 28, aac 128k audio)
         output_path = os.path.join(temp_dir, "compressed_" + name_part + ".mp4")
-        if not shutil.which("ffmpeg"):
+        if not FFMPEG_EXE:
             raise Exception("FFmpeg is not installed on this server. Video compression is unavailable.")
         
         cmd = [
@@ -1303,7 +1312,7 @@ async def run_file_conversion(input_path, target_format, temp_dir):
         # Voice Effects using FFmpeg filters
         effect = target_format.split("_")[1]
         output_path = os.path.join(temp_dir, f"vfx_{effect}_" + name_part + ".mp3")
-        if not shutil.which("ffmpeg"):
+        if not FFMPEG_EXE:
             raise Exception("FFmpeg is not installed on this server.")
             
         filters = {
@@ -1313,7 +1322,7 @@ async def run_file_conversion(input_path, target_format, temp_dir):
             "echo": "aecho=0.8:0.9:1000:0.3"
         }
         filter_str = filters.get(effect, "aecho=0.8:0.88:6:0.4")
-        cmd = ["ffmpeg", "-y", "-i", input_path, "-af", filter_str, output_path]
+        cmd = [FFMPEG_EXE, "-y", "-i", input_path, "-af", filter_str, output_path]
         
         loop = asyncio.get_running_loop()
         def process_vfx():
@@ -3439,6 +3448,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     )
                                     
                             import shutil
+
+try:
+    import imageio_ffmpeg
+    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+except ImportError:
+    import shutil
+    FFMPEG_EXE = FFMPEG_EXE
+
                             zip_output_path = os.path.join(temp_dir, folder_name)
                             await status_msg.edit_text("📦 *Compressing folder...*")
                             shutil.make_archive(zip_output_path, 'zip', local_folder_dir)
@@ -3728,6 +3745,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 )
                                 
                         import shutil
+
+try:
+    import imageio_ffmpeg
+    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+except ImportError:
+    import shutil
+    FFMPEG_EXE = FFMPEG_EXE
+
                         zip_output_path = os.path.join(temp_dir, folder_name)
                         await status_msg.edit_text("📦 *Compressing folder...*")
                         shutil.make_archive(zip_output_path, 'zip', local_folder_dir)
