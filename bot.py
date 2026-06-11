@@ -1720,21 +1720,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             KeyboardButton("🔍 YouTube Search"),
-            KeyboardButton("🔞 Pornhub Search")
+            KeyboardButton("🎵 Spotify Downloader")
         ],
         [
-            KeyboardButton("🎵 Spotify Downloader"),
-            KeyboardButton("🐙 Git Downloader")
+            KeyboardButton("🐙 Git Downloader"),
+            KeyboardButton("🔄 File Converter")
         ],
         [
-            KeyboardButton("🔄 File Converter"),
-            KeyboardButton("📥 Direct Link Downloader")
+            KeyboardButton("📥 Direct Link Downloader"),
+            KeyboardButton("🤖 AI Chat")
         ],
         [
-            KeyboardButton("🤖 AI Chat"),
-            KeyboardButton("📊 Statistics")
-        ],
-        [
+            KeyboardButton("📊 Statistics"),
             KeyboardButton("❓ Help & Guide")
         ]
     ]
@@ -1935,60 +1932,105 @@ async def run_pornhub_search(query, page=1):
         })
     return items
 
-async def render_phsearch_page(message, query, page, query_uuid, edit=False):
+async def render_phsearch_page(message, query, item_index, query_uuid, edit=False):
+    import telegram
     try:
-        entries = await run_pornhub_search(query, page)
+        fetch_page = ((item_index - 1) // 5) + 1
+        entries = await run_pornhub_search(query, fetch_page)
 
         if not entries:
+            err_msg = "❌ No results found." if item_index == 1 else "❌ No more results."
             if edit:
-                await message.edit_text("❌ No more results found.")
+                try:
+                    await message.edit_caption(err_msg)
+                except Exception:
+                    await message.edit_text(err_msg)
             else:
-                await message.reply_text("❌ No results found.")
+                await message.reply_text(err_msg)
             return
 
-        text = f"🔞 *PORNHUB SEARCH / جستجوی پورن‌هاب*\n{DIVIDER}\nQuery: `{query}`\nPage: `{page}`\n\n"
+        local_index = (item_index - 1) % 5
+        if local_index >= len(entries):
+            err_msg = "❌ No more results."
+            if edit:
+                try:
+                    await message.edit_caption(err_msg)
+                except Exception:
+                    await message.edit_text(err_msg)
+            else:
+                await message.reply_text(err_msg)
+            return
+
+        entry = entries[local_index]
+        title = entry.get('title', 'Pornhub Video')
+        duration = entry.get('duration', '00:00')
+        url = entry.get('url', '')
+        thumbnail = entry.get('thumbnail', '')
+
+        caption = (
+            f"🔞 *PORNHUB SEARCH / جستجوی پورن‌هاب*\n"
+            f"{DIVIDER}\n"
+            f"🎬 *{title}*\n"
+            f"⏱ Duration: `{duration}`\n"
+            f"🔢 Result: `{item_index}`\n\n"
+            f"👇 Choose an action below:"
+        )
+
+        url_id = uuid.uuid4().hex[:8]
+        URL_CACHE[url_id] = {
+            'url': url,
+            'title': title,
+            'thumbnail': thumbnail,
+            'preview_url': entry.get('preview_url'),
+            'duration': parse_time_str(str(duration)) or 0,
+            'is_ph': True
+        }
+
         keyboard = []
-
-        for idx, entry in enumerate(entries):
-            global_idx = (page - 1) * 5 + idx + 1
-            title = entry.get('title', 'Pornhub Video')
-            duration = entry.get('duration', '00:00')
-            title_display = title[:50] + ('...' if len(title) > 50 else '')
-            text += f"{global_idx}️⃣ *{title_display}*\n      └─ ⏱ `{duration}`\n\n"
-
-            url_id = uuid.uuid4().hex[:8]
-            dur_seconds = parse_time_str(str(duration)) or 0
-
-            URL_CACHE[url_id] = {
-                'url': entry.get('url', ''),
-                'title': title,
-                'thumbnail': entry.get('thumbnail', ''),
-                'preview_url': entry.get('preview_url'),
-                'duration': dur_seconds,
-                'is_ph': True
-            }
-
-            row = []
-            if entry.get('preview_url'):
-                row.append(InlineKeyboardButton(f"🎬 Preview #{global_idx}", callback_data=f"phprev:{url_id}"))
-            row.append(InlineKeyboardButton(f"📥 Download #{global_idx}", callback_data=f"opt:{url_id}"))
-            keyboard.append(row)
+        row = []
+        if entry.get('preview_url'):
+            row.append(InlineKeyboardButton("🎬 Send GIF Preview", callback_data=f"phprev:{url_id}"))
+        row.append(InlineKeyboardButton("📥 Download Media", callback_data=f"opt:{url_id}"))
+        keyboard.append(row)
 
         pagination_row = []
-        if page > 1:
-            pagination_row.append(InlineKeyboardButton("◀️ Prev (قبلی)", callback_data=f"phsrc:{page - 1}:{query_uuid}"))
-        pagination_row.append(InlineKeyboardButton("▶️ Next (بعدی)", callback_data=f"phsrc:{page + 1}:{query_uuid}"))
+        if item_index > 1:
+            pagination_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"phsrc:{item_index - 1}:{query_uuid}"))
+        pagination_row.append(InlineKeyboardButton("▶️ Next", callback_data=f"phsrc:{item_index + 1}:{query_uuid}"))
         keyboard.append(pagination_row)
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
         if edit:
-            await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            if thumbnail:
+                try:
+                    await message.edit_media(
+                        media=telegram.InputMediaPhoto(media=thumbnail, caption=caption, parse_mode="Markdown"),
+                        reply_markup=reply_markup
+                    )
+                except telegram.error.BadRequest as e:
+                    if "There is no media in the message to edit" in str(e) or "Message is not modified" in str(e):
+                        await message.delete()
+                        await message.reply_photo(photo=thumbnail, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
+                    else:
+                        raise e
+            else:
+                try:
+                    await message.edit_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
+                except Exception:
+                    pass
         else:
-            await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            if thumbnail:
+                await message.reply_photo(photo=thumbnail, caption=caption, reply_markup=reply_markup, parse_mode="Markdown")
+            else:
+                await message.reply_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Pornhub search rendering failed: {e}", exc_info=True)
         err_msg = f"❌ *Search failed:* `{str(e)[:150]}`"
         if edit:
-            await message.edit_text(err_msg, parse_mode="Markdown")
+            try:
+                await message.edit_caption(err_msg)
+            except Exception:
+                await message.edit_text(err_msg)
         else:
             await message.reply_text(err_msg, parse_mode="Markdown")
 
