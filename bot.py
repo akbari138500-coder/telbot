@@ -2528,23 +2528,24 @@ async def query_gemini(prompt: str) -> str:
 async def query_agentrouter(prompt: str) -> str:
     import aiohttp
     import os
-    api_key = os.getenv("AGENTROUTER_API_KEY")
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("AGENTROUTER_API_KEY")
     if not api_key:
-        return "⚠️ AI Error: AGENTROUTER_API_KEY is not set in .env file."
+        return "⚠️ AI Error: OPENROUTER_API_KEY or AGENTROUTER_API_KEY is not set in .env file."
     
-    url = "https://api.agentrouter.org/v1/chat/completions"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
-        "model": "opus-4.6",
+        "model": "anthropic/claude-opus-4.6",
         "messages": [{"role": "user", "content": prompt}]
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://techpulse.com",
+        "X-Title": "TechPulse Bot"
     }
     proxy_url = get_proxy_url()
     try:
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
