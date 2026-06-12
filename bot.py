@@ -388,13 +388,7 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
         if not candidates:
             candidates = formats  # fallback: anything
 
-        # Prefer combined streams (have audio); otherwise pick highest tbr video
-        combined = [f for f in candidates if f.get("acodec") != "none" and f.get("vcodec") != "none"]
-        if combined:
-            best = max(combined, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
-        else:
-            best = max(candidates, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
-
+        best = max(candidates, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
         return best.get("format_id")
     except Exception as e:
         logger.warning(f"Format probe failed: {e}")
@@ -1098,6 +1092,7 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "concurrent_fragment_downloads": 5,
         "writesubtitles": True,
         "allsubtitles": False,
         "subtitleslangs": ["en", "fa"],
