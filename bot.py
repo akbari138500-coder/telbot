@@ -758,7 +758,7 @@ async def upload_to_uplod_ir(filepath: str) -> str:
     """Uploads a file to uplod.ir and returns the download link."""
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get("http://uplod.ir") as resp:
+            async with session.get("http://uplod.ir", ssl=False) as resp:
                 text = await resp.text()
             
             match = re.search(r'action="([^"]+cgi-bin/upload.cgi\?.*?)"', text)
@@ -770,7 +770,7 @@ async def upload_to_uplod_ir(filepath: str) -> str:
             data.add_field('upload_type', 'file')
             data.add_field('file_0', open(filepath, 'rb'), filename=os.path.basename(filepath))
             
-            async with session.post(upload_url, data=data) as resp:
+            async with session.post(upload_url, data=data, ssl=False) as resp:
                 result_text = await resp.text()
                 try:
                     # Often wrapped in <textarea> for XFilesharing
@@ -2565,7 +2565,7 @@ async def query_gemini(prompt: str) -> str:
 async def query_agentrouter(prompt: str) -> str:
     import aiohttp
     import os
-    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("AGENTROUTER_API_KEY")
+    api_key = (os.getenv("OPENROUTER_API_KEY") or os.getenv("AGENTROUTER_API_KEY") or "").strip()
     if not api_key:
         return "⚠️ AI Error: OPENROUTER_API_KEY or AGENTROUTER_API_KEY is not set in .env file."
     
@@ -2576,6 +2576,8 @@ async def query_agentrouter(prompt: str) -> str:
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
+        "Authentication": f"Bearer {api_key}",
+        "x-api-key": api_key,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://techpulse.com",
         "X-Title": "TechPulse Bot"
