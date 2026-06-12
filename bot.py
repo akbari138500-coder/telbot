@@ -773,7 +773,13 @@ async def upload_to_uplod_ir(filepath: str) -> str:
             async with session.post(upload_url, data=data) as resp:
                 result_text = await resp.text()
                 try:
-                    result = json.loads(result_text)
+                    # Often wrapped in <textarea> for XFilesharing
+                    json_str = result_text
+                    ta_match = re.search(r'<textarea[^>]*>(.*?)</textarea>', result_text, re.IGNORECASE | re.DOTALL)
+                    if ta_match:
+                        json_str = ta_match.group(1)
+                    
+                    result = json.loads(json_str)
                     if isinstance(result, list) and len(result) > 0:
                         file_code = result[0].get("file_code")
                         if file_code:
@@ -785,7 +791,7 @@ async def upload_to_uplod_ir(filepath: str) -> str:
                 if fn_match:
                     return f"http://uplod.ir/{fn_match.group(1)}"
                     
-                raise ValueError("Could not parse upload result")
+                raise ValueError(f"Could not parse upload result: {result_text[:100]}")
     except Exception as e:
         logger.error(f"Uplod.ir upload failed: {e}")
         return None
@@ -2844,7 +2850,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = await query_gemini(text)
         
         # Format Gemini's Markdown to be more compatible with Telegram's legacy Markdown
-        import re
         formatted_text = response
         formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text) # Convert **bold** to *bold*
         formatted_text = re.sub(r'^###\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
@@ -3119,7 +3124,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Direct link download
         await status_msg.delete()
-        await add_to_queue(url, message, None, custom_name, user_id=user_id)
+        import uuid
+        url_id = uuid.uuid4().hex[:8]
+        URL_CACHE[url_id] = {
+            'url': url,
+            'title': custom_name or "Direct File",
+            'thumbnail': None,
+            'duration': 0,
+            'start_time': None,
+            'end_time': None
+        }
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("📥 Download to Telegram (تلگرام)", callback_data=f"dl:{url_id}:file"),
+                InlineKeyboardButton("🌐 Upload to Web (مستقیم)", callback_data=f"dl:{url_id}:web")
+            ],
+            [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
+        ]
+        
+        await message.reply_text(
+            f"📥 *DIRECT LINK / لینک مستقیم*\n"
+            f"{DIVIDER}\n"
+            f"🔗 `{url}`\n\n"
+            f"👇 *Choose action:* / یکی از گزینه‌ها را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
 
 async def handle_subtitle_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
