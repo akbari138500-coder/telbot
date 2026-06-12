@@ -519,7 +519,7 @@ async def bypass_url(url):
         headers = {"User-Agent": "Mozilla/5.0"}
         for _ in range(5):  # Max 5 hops
             try:
-                async with session.head(current_url, headers=headers, allow_redirects=False, proxy=proxy_url) as resp:
+                async with session.head(current_url, headers=headers, allow_redirects=False, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status in (301, 302, 303, 307, 308):
                         next_url = resp.headers.get('Location')
                         if next_url:
@@ -1137,19 +1137,19 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         else:
             raise e
 
-        if audio_only:
-            base, _ = os.path.splitext(filename)
-            for ext in (".mp3", ".m4a", ".opus", ".ogg", ".webm"):
-                if os.path.exists(base + ext):
-                    filename = base + ext
-                    break
+    if audio_only:
+        base, _ = os.path.splitext(filename)
+        for ext in (".mp3", ".m4a", ".opus", ".ogg", ".webm"):
+            if os.path.exists(base + ext):
+                filename = base + ext
+                break
 
-        if merge_fmt == "mp4" and not filename.endswith(".mp4"):
-            base, _ = os.path.splitext(filename)
-            if os.path.exists(base + ".mp4"):
-                filename = base + ".mp4"
+    if merge_fmt == "mp4" and not filename.endswith(".mp4"):
+        base, _ = os.path.splitext(filename)
+        if os.path.exists(base + ".mp4"):
+            filename = base + ".mp4"
 
-        return filename
+    return filename
 
 # =====================================================================
 # Video Processing & Splitting
@@ -2515,7 +2515,7 @@ async def query_gemini(prompt: str) -> str:
     proxy_url = get_proxy_url()
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, proxy=proxy_url) as resp:
+            async with session.post(url, json=payload, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     candidates = data.get("candidates", [])
@@ -2545,7 +2545,7 @@ async def query_agentrouter(prompt: str) -> str:
     try:
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.post(url, json=payload, headers=headers, proxy=proxy_url) as resp:
+            async with session.post(url, json=payload, headers=headers, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     choices = data.get("choices", [])
@@ -2788,7 +2788,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             urls.append(entity.url)
             
     # 2. Robust Regex for explicit URLs in text (avoids offset issues with emojis)
-    url_matches = re.findall(r"(?:https?://|www\.)[^\s]+", message.text)
+    url_matches = re.findall(r"(?:https?://|www\.|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/)[^\s]+", message.text)
     for match in url_matches:
         if match not in urls:
             urls.append(match)
