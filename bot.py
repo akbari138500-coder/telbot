@@ -754,6 +754,42 @@ async def upload_to_techpulse(filepath, custom_filename=None):
         logger.error(f"TechPulse upload exception: {e}")
         return False, str(e)
 
+async def upload_to_uplod_ir(filepath: str) -> str:
+    """Uploads a file to uplod.ir and returns the download link."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("http://uplod.ir") as resp:
+                text = await resp.text()
+            
+            match = re.search(r'action="([^"]+cgi-bin/upload.cgi\?.*?)"', text)
+            if not match:
+                raise ValueError("Could not find upload URL on uplod.ir")
+            upload_url = match.group(1)
+            
+            data = aiohttp.FormData()
+            data.add_field('upload_type', 'file')
+            data.add_field('file_0', open(filepath, 'rb'), filename=os.path.basename(filepath))
+            
+            async with session.post(upload_url, data=data) as resp:
+                result_text = await resp.text()
+                try:
+                    result = json.loads(result_text)
+                    if isinstance(result, list) and len(result) > 0:
+                        file_code = result[0].get("file_code")
+                        if file_code:
+                            return f"http://uplod.ir/{file_code}"
+                except Exception:
+                    pass
+                
+                fn_match = re.search(r'fn">([^<]+)', result_text)
+                if fn_match:
+                    return f"http://uplod.ir/{fn_match.group(1)}"
+                    
+                raise ValueError("Could not parse upload result")
+    except Exception as e:
+        logger.error(f"Uplod.ir upload failed: {e}")
+        return None
+
 UPLOAD_CACHE = {}
 
 async def register_file_for_upload(bot, chat_id, filepath, filename, reply_to_message_id=None):
@@ -3010,9 +3046,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ],
                 [
                     InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dl:{url_id}:audio"),
-                    InlineKeyboardButton("✂️ Trim Range (برش)", callback_data=f"dl:{url_id}:trim"),
+                    InlineKeyboardButton("🌐 Upload to Web (مستقیم)", callback_data=f"dl:{url_id}:web")
                 ],
-                [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
+                [
+                    InlineKeyboardButton("✂️ Trim Range (برش)", callback_data=f"dl:{url_id}:trim"),
+                    InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")
+                ]
             ]
             
             # Add GIF option directly if video <= 15s
@@ -4292,7 +4331,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             as_gif=as_gif,
             cached_title=cached['title'],
             cached_thumb=cached['thumbnail'],
-            user_id=user_id
+            user_id=user_id,
+            upload_mode="web" if choice == "web" else None
         )
         URL_CACHE.pop(url_id, None)
 
@@ -4506,7 +4546,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================================
 # Queue Execution System
 # =====================================================================
-async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_time=None, end_time=None, as_gif=False, cached_title=None, cached_thumb=None, user_id=None, audio_title=None, audio_performer=None):
+async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_time=None, end_time=None, as_gif=False, cached_title=None, cached_thumb=None, user_id=None, audio_title=None, audio_performer=None, upload_mode=None):
     """Enqueues single download task."""
     chat_id = message_to_reply.chat.id
     status_msg = await message_to_reply.reply_text("⏳ *Calculating position in queue...*", parse_mode="Markdown")
@@ -4569,19 +4609,27 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                     )
 
                 if filepath and os.path.exists(filepath):
-                    # Send media
-                    await send_file_to_telegram(
-                        bot=status_msg.get_bot(),
-                        chat_id=chat_id,
-                        filepath=filepath,
-                        reply_to_message_id=message_to_reply.message_id,
-                        thumbnail_path=thumbnail_path,
-                        as_gif=as_gif,
-                        user_id=user_id,
-                        audio_title=audio_title,
-                        audio_performer=audio_performer
-                    )
-                    await status_msg.delete()
+                    if upload_mode == "web":
+                        await status_msg.edit_text("🌐 *Uploading file to Uplod.ir... / در حال آپلود به سرور وب*", parse_mode="Markdown")
+                        web_link = await upload_to_uplod_ir(filepath)
+                        if web_link:
+                            await status_msg.edit_text(f"✅ *Upload Successful! / آپلود موفق*\n\n📥 **Download Link:** {web_link}", parse_mode="Markdown", disable_web_page_preview=True)
+                        else:
+                            await status_msg.edit_text("❌ *Failed to upload file to Uplod.ir.*")
+                    else:
+                        # Send media to Telegram
+                        await send_file_to_telegram(
+                            bot=status_msg.get_bot(),
+                            chat_id=chat_id,
+                            filepath=filepath,
+                            reply_to_message_id=message_to_reply.message_id,
+                            thumbnail_path=thumbnail_path,
+                            as_gif=as_gif,
+                            user_id=user_id,
+                            audio_title=audio_title,
+                            audio_performer=audio_performer
+                        )
+                        await status_msg.delete()
                 else:
                     await status_msg.edit_text("❌ *Download completed but file was not found locally.*")
         except Exception as e:
