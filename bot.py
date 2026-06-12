@@ -11,7 +11,7 @@ try:
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 except ImportError:
     import shutil
-    FFMPEG_EXE = FFMPEG_EXE
+    FFMPEG_EXE = shutil.which("ffmpeg") or "ffmpeg"
 
 import sqlite3
 import zipfile
@@ -2789,7 +2789,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             urls.append(entity.url)
             
     # 2. Robust Regex for explicit URLs in text (avoids offset issues with emojis)
-    url_matches = re.findall(r"(?:https?://|www\.|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/)[^\s]+", message.text)
+    url_matches = re.findall(r"(?:https?://|www\.)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*", message.text)
     for match in url_matches:
         if match not in urls:
             urls.append(match)
@@ -2831,6 +2831,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     raw_url = urls[0]
+    if not raw_url.startswith(("http://", "https://")):
+        raw_url = "https://" + raw_url
+        
     # Bypass redirects (Link Shorteners)
     status_msg = await message.reply_text("🔍 *Resolving link redirects... / در حال بررسی لینک*", parse_mode="Markdown")
     url = await bypass_url(raw_url)
