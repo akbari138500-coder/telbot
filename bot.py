@@ -9,9 +9,14 @@ import shutil
 try:
     import imageio_ffmpeg
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+    # ffprobe is in the same directory as ffmpeg in imageio_ffmpeg
+    _ffmpeg_dir = os.path.dirname(FFMPEG_EXE)
+    FFPROBE_EXE = os.path.join(_ffmpeg_dir, "ffprobe")
+    if not os.path.exists(FFPROBE_EXE):
+        FFPROBE_EXE = shutil.which("ffprobe") or "ffprobe"
 except ImportError:
-    import shutil
     FFMPEG_EXE = shutil.which("ffmpeg") or "ffmpeg"
+    FFPROBE_EXE = shutil.which("ffprobe") or "ffprobe"
 
 import sqlite3
 import zipfile
@@ -40,13 +45,20 @@ def check_proxy_port(host="127.0.0.1", port=10808, timeout=1.0) -> bool:
         return False
 
 def get_proxy_url() -> str | None:
-    if check_proxy_port("127.0.0.1", 10808):
-        return "http://127.0.0.1:10808"
+    # Check V2Ray/Nekoray SOCKS proxy (common ports)
+    for port in [10808, 10809, 1080, 7890, 8080, 10800]:
+        if check_proxy_port("127.0.0.1", port):
+            return f"http://127.0.0.1:{port}"
+    # Check environment proxy
+    env_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("http_proxy") or os.environ.get("https_proxy")
+    if env_proxy and env_proxy.strip():
+        return env_proxy.strip()
     return None
 
 # Configure V2Ray/Nekoray proxy globally if active
-if check_proxy_port("127.0.0.1", 10808):
-    PROXY_URL = "http://127.0.0.1:10808"
+proxy_url = get_proxy_url()
+if proxy_url:
+    PROXY_URL = proxy_url
     os.environ['http_proxy'] = PROXY_URL
     os.environ['https_proxy'] = PROXY_URL
     os.environ['all_proxy'] = PROXY_URL
@@ -144,6 +156,7 @@ COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt")) 
 URL_CACHE = {}          # Store media details (uuid -> data)
 USER_STATES = {}        # User states (user_id -> {'state': '...', 'url_id': '...'})
 download_queue: asyncio.Queue = asyncio.Queue()  # Global sequential task queue
+MAX_CONCURRENT_DOWNLOADS = 3  # Allow up to 3 parallel downloads
 
 def get_ydl_cookie_opts() -> dict:
     """Returns yt-dlp cookie options to bypass bot detection on YouTube/PornHub."""
@@ -237,8 +250,9 @@ def sanitize_cookies_file(filepath: str):
 # ---------------------------------------------------------------------------
 COBALT_API_INSTANCES = [
     "https://api.cobalt.tools",
-    "https://cobalt.api.timelessnesses.me",
     "https://cobalt-api.ente.io",
+    "https://cobalt.api.timelessnesses.me",
+    "https://api.cobalt.best",
 ]
 
 async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) -> str | None:
@@ -266,9 +280,11 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
                     proxy=proxy_url
                 ) as resp:
                     if resp.status != 200:
+                        logger.warning(f"Cobalt {instance} returned HTTP {resp.status}")
                         continue
                     data = await resp.json()
                     status = data.get("status")
+                    logger.info(f"Cobalt {instance} response status: {status}")
 
                     # tunnel / redirect — direct download URL
                     if status in ("tunnel", "redirect") and data.get("url"):
@@ -295,6 +311,12 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
                                         async for chunk in dresp.content.iter_chunked(512 * 1024):
                                             f.write(chunk)
                                     return fname
+
+                    # error status
+                    if status and status != "tunnel" and status != "redirect" and status != "picker":
+                        error_text = data.get("error", {}).get("description", "Unknown error")
+                        logger.warning(f"Cobalt {instance} error: {status} - {error_text}")
+                        
             except Exception as e:
                 logger.warning(f"Cobalt instance {instance} failed: {e}")
                 continue
@@ -362,8 +384,9 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
         if proxy_url:
             cmd += ["--proxy", proxy_url]
         cmd += ["--extractor-args", "youtube:player_client=android,web"]
+        cmd += ["--socket-timeout", "15"]
         cmd.append(url)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if result.returncode != 0:
             return None
         info = json.loads(result.stdout)
@@ -536,16 +559,19 @@ async def get_invidious_domains():
         
     proxy_url = get_proxy_url()
     default_fallbacks = [
-        "yt.chocolatemoo53.com",
         "invidious.nerdvpn.de",
         "inv.nadeko.net",
-        "invidious.tiekoetter.com",
-        "invidious.flokinet.to"
+        "invidious.fdn.fr",
+        "iv.datura.network",
+        "invidious.perennialte.ch",
+        "yt.artemislena.eu",
+        "invidious.privacyredirect.com",
+        "vid.puffyan.us"
     ]
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.invidious.io/instances.json", proxy=proxy_url, timeout=10) as resp:
+            async with session.get("https://api.invidious.io/instances.json", proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     instances_data = await resp.json()
                     domains = []
@@ -580,18 +606,26 @@ async def search_youtube_invidious(query: str) -> str | None:
     proxy_url = get_proxy_url()
     encoded_query = urllib.parse.quote(query)
     
-    for domain in domains[:10]:
-        search_url = f"https://{domain}/api/v1/search?q={encoded_query}"
+    for domain in domains[:8]:
+        search_url = f"https://{domain}/api/v1/search?q={encoded_query}&type=video"
         logger.info(f"Trying Invidious search on {domain}...")
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(search_url, proxy=proxy_url, timeout=8) as resp:
+                async with session.get(search_url, proxy=proxy_url,
+                                       timeout=aiohttp.ClientTimeout(total=12)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if isinstance(data, list) and len(data) > 0:
+                            for item in data[:3]:
+                                video_id = item.get("videoId")
+                                if video_id:
+                                    length = item.get("lengthSeconds", 0)
+                                    if length and length > 0:
+                                        logger.info(f"Invidious search success ({domain}): {video_id}")
+                                        return f"https://www.youtube.com/watch?v={video_id}"
                             video_id = data[0].get("videoId")
                             if video_id:
-                                logger.info(f"Successfully resolved track via Invidious search ({domain}): {video_id}")
+                                logger.info(f"Invidious search success ({domain}): {video_id}")
                                 return f"https://www.youtube.com/watch?v={video_id}"
         except Exception as e:
             logger.warning(f"Invidious search failed on {domain}: {e}")
@@ -599,122 +633,131 @@ async def search_youtube_invidious(query: str) -> str | None:
     return None
 
 async def fetch_spotify_metadata(url):
-    """Fetches track metadata from public Spotify page with robust tls-client scraper & fallbacks."""
-    # Try SpotipyFree first (as requested)
-    try:
-        from SpotipyFree import Spotify
-        sp = Spotify()
-        # Extract track ID
-        import re
-        m = re.search(r'/track/([a-zA-Z0-9]+)', url)
-        if m:
-            track_id = m.group(1)
-            logger.info(f"Trying SpotipyFree for ID: {track_id}")
-            track_info = sp.track(track_id)
-            logger.info("SpotipyFree Succeeded!")
-            return {
-                "title": track_info.get("name"),
-                "artist": track_info.get("artists", [{}])[0].get("name", "Unknown Artist"),
-                "thumbnail": track_info.get("album", {}).get("images", [{}])[0].get("url")
-            }
-    except Exception as e:
-        logger.warning(f"SpotipyFree failed, falling back: {e}")
-        
-    # Fallback to our robust tls_client scraper
-    import tls_client
-    import json
-    from urllib.parse import urlparse, unquote
+    """Fetches track metadata from public Spotify page with robust fallbacks."""
+    import re
     
     track_id = None
-    parsed = urlparse(url)
-    path_parts = parsed.path.strip("/").split("/")
-    if "track" in path_parts:
-        idx = path_parts.index("track")
-        if idx + 1 < len(path_parts):
-            track_id = path_parts[idx + 1].split("?")[0]
+    m = re.search(r'/track/([a-zA-Z0-9]+)', url)
+    if m:
+        track_id = m.group(1)
+    
     if not track_id:
-        import re
-        m = re.search(r'/track/([a-zA-Z0-9]+)', url)
-        if m:
-            track_id = m.group(1)
-            
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip("/").split("/")
+        if "track" in path_parts:
+            idx = path_parts.index("track")
+            if idx + 1 < len(path_parts):
+                track_id = path_parts[idx + 1].split("?")[0]
+    
     if not track_id:
         return None
-        
-    proxy = get_proxy_url()
-    session = tls_client.Session(client_identifier="chrome_120", random_tls_extension_order=True)
-    if proxy:
-        session.proxies = {"http": proxy, "https": proxy}
-        
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://open.spotify.com/"
-    }
-    
-    # Method 1: Embed page JSON
+
+    # Method 1: spotipy library (official)
     try:
+        import spotipy
+        from spotipy import SpotifyClientCredentials
+        client_id = os.getenv("SPOTIFY_CLIENT_ID", "")
+        client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+        if client_id and client_secret:
+            sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+                client_id=client_id, client_secret=client_secret
+            ))
+            track_info = sp.track(track_id)
+            if track_info:
+                logger.info("Spotify metadata fetched via spotipy")
+                return {
+                    "title": track_info.get("name"),
+                    "artist": track_info.get("artists", [{}])[0].get("name", "Unknown Artist"),
+                    "thumbnail": track_info.get("album", {}).get("images", [{}])[0].get("url")
+                }
+    except Exception as e:
+        logger.warning(f"spotipy failed: {e}")
+
+    # Method 2: oEmbed API (no auth needed)
+    try:
+        import urllib.parse as _up
+        oembed_url = f"https://open.spotify.com/oembed?url={_up.quote(url)}"
+        proxy_url = get_proxy_url()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(oembed_url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    title = data.get("title", "")
+                    if title:
+                        logger.info("Spotify metadata fetched via oEmbed")
+                        artist = "Unknown Artist"
+                        if " - " in title:
+                            parts = title.split(" - ", 1)
+                            artist = parts[0]
+                            title = parts[1]
+                        elif " by " in title:
+                            parts = title.rsplit(" by ", 1)
+                            title = parts[0]
+                            artist = parts[1]
+                        return {
+                            "title": title,
+                            "artist": artist,
+                            "thumbnail": data.get("thumbnail_url")
+                        }
+    except Exception as e:
+        logger.warning(f"oEmbed failed: {e}")
+
+    # Method 3: og tags from embed page
+    try:
+        proxy_url = get_proxy_url()
         embed_url = f"https://open.spotify.com/embed/track/{track_id}"
-        resp = session.get(embed_url, headers=headers)
-        if resp.status_code == 200:
-            import re
-            m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', resp.text)
-            if m:
-                data = json.loads(m.group(1))
-                state_data = data.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {})
-                entity = state_data.get("entity", {})
-                if entity and entity.get("type") == "track":
-                    title = entity.get("title") or entity.get("name")
-                    artists = entity.get("artists", [])
-                    artist = artists[0].get("name") if artists else "Unknown Artist"
-                    images = entity.get("visualIdentity", {}).get("image", [])
-                    thumbnail = None
-                    if images:
-                        sorted_images = sorted(images, key=lambda x: x.get("maxWidth", 0), reverse=True)
-                        thumbnail = sorted_images[0].get("url")
-                    return {"title": title, "artist": artist, "thumbnail": thumbnail}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(embed_url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+                    title = unquote(title_match.group(1)) if title_match else None
+                    image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+                    image = image_match.group(1) if image_match else None
+                    desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+                    desc = unquote(desc_match.group(1)) if desc_match else ""
+                    artist = "Unknown Artist"
+                    if " · " in desc:
+                        parts = desc.split(" · ")
+                        if parts[0].startswith("Song by "):
+                            artist = parts[0].replace("Song by ", "")
+                        elif len(parts) > 1 and "by " in parts[0]:
+                            artist = parts[0].split("by ")[-1]
+                    elif "by " in desc:
+                        artist = desc.split("by ")[-1]
+                    if title:
+                        logger.info("Spotify metadata fetched via embed page")
+                        return {"title": title, "artist": artist, "thumbnail": image}
     except Exception as e:
-        logger.error(f"Embed page parsing failed: {e}")
-        
-    # Method 2: oEmbed API
+        logger.warning(f"Embed page failed: {e}")
+
+    # Method 4: og tags from main page
     try:
-        import urllib.parse
-        oembed_url = f"https://open.spotify.com/oembed?url={urllib.parse.quote(url)}"
-        resp = session.get(oembed_url, headers=headers)
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "title": data.get("title"),
-                "artist": "Unknown Artist",
-                "thumbnail": data.get("thumbnail_url")
-            }
+        proxy_url = get_proxy_url()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+                    title = unquote(title_match.group(1)) if title_match else None
+                    image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+                    image = image_match.group(1) if image_match else None
+                    desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+                    desc = unquote(desc_match.group(1)) if desc_match else ""
+                    artist = "Unknown Artist"
+                    if " · " in desc:
+                        parts = desc.split(" · ")
+                        if parts[0].startswith("Song by "):
+                            artist = parts[0].replace("Song by ", "")
+                        elif len(parts) > 1 and "by " in parts[0]:
+                            artist = parts[0].split("by ")[-1]
+                    elif "by " in desc:
+                        artist = desc.split("by ")[-1]
+                    if title:
+                        logger.info("Spotify metadata fetched via main page")
+                        return {"title": title, "artist": artist, "thumbnail": image}
     except Exception as e:
-        logger.error(f"oEmbed failed: {e}")
-        
-    # Method 3: og tags on main page
-    try:
-        resp = session.get(url, headers=headers)
-        if resp.status_code == 200:
-            html = resp.text
-            import re
-            title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
-            title = unquote(title_match.group(1)) if title_match else None
-            image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
-            image = image_match.group(1) if image_match else None
-            desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
-            desc = unquote(desc_match.group(1)) if desc_match else ""
-            artist = "Unknown Artist"
-            if " · " in desc:
-                parts = desc.split(" · ")
-                if parts[0].startswith("Song by "):
-                    artist = parts[0].replace("Song by ", "")
-                elif len(parts) > 1 and "by " in parts[0]:
-                    artist = parts[0].split("by ")[-1]
-            elif "by " in desc:
-                artist = desc.split("by ")[-1]
-            if title:
-                return {"title": title, "artist": artist, "thumbnail": image}
-    except Exception as e:
-        logger.error(f"Main page parsing failed: {e}")
+        logger.warning(f"Main page failed: {e}")
         
     return None
 
@@ -729,19 +772,22 @@ async def upload_to_techpulse(filepath, custom_filename=None):
         mime_type = 'application/octet-stream'
         
     logger.info(f"Uploading {filename} ({mime_type}) to TechPulse: {url}")
+    proxy_url = get_proxy_url()
     try:
         data = aiohttp.FormData()
-        data.add_field(
-            'file',
-            open(filepath, 'rb'),
-            filename=filename,
-            content_type=mime_type
-        )
+        with open(filepath, 'rb') as f:
+            data.add_field(
+                'file',
+                f,
+                filename=filename,
+                content_type=mime_type
+            )
         data.add_field('category', 'دانلود بات')
         data.add_field('ownerId', 'downloader_bot')
         
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, timeout=120) as resp:
+            async with session.post(url, data=data, timeout=aiohttp.ClientTimeout(total=120),
+                                   proxy=proxy_url) as resp:
                 if resp.status in (200, 201):
                     res_json = await resp.json()
                     logger.info(f"TechPulse upload succeeded: {res_json}")
@@ -757,41 +803,80 @@ async def upload_to_techpulse(filepath, custom_filename=None):
 async def upload_to_uplod_ir(filepath: str) -> str:
     """Uploads a file to uplod.ir and returns the download link."""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("http://uplod.ir", ssl=False) as resp:
+        proxy_url = get_proxy_url()
+        UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        headers = {"User-Agent": UA}
+        
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get("https://uplod.ir", ssl=False, proxy=proxy_url,
+                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"Failed to load uplod.ir homepage: HTTP {resp.status}")
                 text = await resp.text()
             
-            match = re.search(r'action="([^"]+cgi-bin/upload.cgi\?.*?)"', text)
-            if not match:
-                raise ValueError("Could not find upload URL on uplod.ir")
-            upload_url = match.group(1)
+            upload_url = None
+            patterns = [
+                r'action="([^"]*cgi-bin/upload\.cgi[^"]*)"',
+                r'action=["\']([^"\']*upload\.cgi[^"\']*)["\']',
+                r'action="(https?://[^"]*upload[^"]*)"',
+                r'(https?://[^"\']*cgi-bin/upload\.cgi[^"\']*)',
+            ]
+            for pat in patterns:
+                match = re.search(pat, text, re.IGNORECASE)
+                if match:
+                    upload_url = match.group(1)
+                    break
+            
+            if not upload_url:
+                raise ValueError("Could not find upload URL on uplod.ir (page structure may have changed)")
+            
+            if upload_url.startswith("/"):
+                upload_url = "https://uplod.ir" + upload_url
+            
+            logger.info(f"Uplod.ir upload URL found: {upload_url}")
+            
+            file_size = os.path.getsize(filepath)
+            filename = os.path.basename(filepath)
             
             data = aiohttp.FormData()
             data.add_field('upload_type', 'file')
-            data.add_field('file_0', open(filepath, 'rb'), filename=os.path.basename(filepath))
+            with open(filepath, 'rb') as f:
+                data.add_field('file_0', f, filename=filename,
+                              content_type='application/octet-stream')
             
-            async with session.post(upload_url, data=data, ssl=False) as resp:
+            async with session.post(upload_url, data=data, ssl=False, proxy=proxy_url,
+                                   timeout=aiohttp.ClientTimeout(total=300)) as resp:
                 result_text = await resp.text()
+                
+                json_str = result_text
+                ta_match = re.search(r'<textarea[^>]*>(.*?)</textarea>', result_text, re.IGNORECASE | re.DOTALL)
+                if ta_match:
+                    json_str = ta_match.group(1)
+                
                 try:
-                    # Often wrapped in <textarea> for XFilesharing
-                    json_str = result_text
-                    ta_match = re.search(r'<textarea[^>]*>(.*?)</textarea>', result_text, re.IGNORECASE | re.DOTALL)
-                    if ta_match:
-                        json_str = ta_match.group(1)
-                    
                     result = json.loads(json_str)
                     if isinstance(result, list) and len(result) > 0:
-                        file_code = result[0].get("file_code")
+                        file_code = result[0].get("file_code") or result[0].get("code")
                         if file_code:
                             return f"http://uplod.ir/{file_code}"
-                except Exception:
+                        dl_link = result[0].get("download_page") or result[0].get("url")
+                        if dl_link:
+                            return dl_link
+                except (json.JSONDecodeError, KeyError, IndexError):
                     pass
                 
-                fn_match = re.search(r'fn">([^<]+)', result_text)
+                fn_match = re.search(r'fn["\s:>]+([^<"\n]+)', result_text)
                 if fn_match:
-                    return f"http://uplod.ir/{fn_match.group(1)}"
+                    code = fn_match.group(1).strip()
+                    if not code.startswith("http"):
+                        return f"http://uplod.ir/{code}"
+                    return code
+                
+                code_match = re.search(r'(?:file_code|code|download_link)["\s:=]+["\']?([a-zA-Z0-9]{5,20})', result_text)
+                if code_match:
+                    return f"http://uplod.ir/{code_match.group(1)}"
                     
-                raise ValueError(f"Could not parse upload result: {result_text[:100]}")
+                raise ValueError(f"Could not parse upload result: {result_text[:200]}")
     except Exception as e:
         logger.error(f"Uplod.ir upload failed: {e}")
         return None
@@ -1134,13 +1219,16 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "concurrent_fragment_downloads": 5,
+        "concurrent_fragment_downloads": 8,
+        "fragment_retries": 10,
+        "retries": 10,
         "writesubtitles": True,
         "allsubtitles": False,
         "subtitleslangs": ["en", "fa"],
         "http_headers": site_opts.pop("http_headers", base_headers),
         "ffmpeg_location": FFMPEG_EXE,
         "extractor_args": {"youtube": {"skip": ["translated_subs"], "player_client": ["android", "web"]}},
+        "socket_timeout": 30,
         **get_ydl_cookie_opts(),
         **site_opts,
     }
@@ -1193,12 +1281,12 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
 # =====================================================================
 def split_video_ffmpeg(filepath, dest_dir, max_part_size=MAX_PART_SIZE):
     """Segments a video file into playable chunks using FFmpeg."""
-    if not FFMPEG_EXE or not shutil.which("ffprobe"):
+    if not FFMPEG_EXE:
         return None
     try:
         file_size = os.path.getsize(filepath)
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            FFPROBE_EXE, "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", filepath
         ]
         duration = float(subprocess.check_output(cmd, stderr=subprocess.PIPE).decode().strip())
@@ -1217,7 +1305,7 @@ def split_video_ffmpeg(filepath, dest_dir, max_part_size=MAX_PART_SIZE):
         output_template = os.path.join(dest_dir, f"{safe_prefix}%03d{ext}")
 
         cmd_split = [
-            "ffmpeg", "-y", "-i", filepath, "-c", "copy", "-map", "0",
+            FFMPEG_EXE, "-y", "-i", filepath, "-c", "copy", "-map", "0",
             "-segment_time", str(segment_duration), "-f", "segment",
             "-reset_timestamps", "1", output_template
         ]
@@ -1234,15 +1322,14 @@ def split_video_ffmpeg(filepath, dest_dir, max_part_size=MAX_PART_SIZE):
         return None
 
 def split_file_binary(file_path, chunk_size):
-    """Splits raw files into 48MB chunks (safe margin under Telegram's 50MB limit)."""
-    SAFE_CHUNK = 48 * 1024 * 1024  # 48MB - safer than 49MB for Telegram
+    """Splits raw files into chunks of specified size."""
     parts = []
     base_name = os.path.basename(file_path)
     dir_name = os.path.dirname(file_path)
     part_num = 1
     with open(file_path, "rb") as f:
         while True:
-            chunk = f.read(SAFE_CHUNK)
+            chunk = f.read(chunk_size)
             if not chunk:
                 break
             part_name = f"{base_name}.part{part_num:03d}"
@@ -1260,7 +1347,7 @@ def convert_to_gif_ffmpeg(input_path, output_path):
     try:
         # High quality palette-based GIF conversion using FFmpeg
         cmd = [
-            "ffmpeg", "-y", "-i", input_path,
+            FFMPEG_EXE, "-y", "-i", input_path,
             "-vf", "fps=10,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
             "-loop", "0", output_path
         ]
@@ -1332,7 +1419,7 @@ async def run_file_conversion(input_path, target_format, temp_dir):
             raise Exception("FFmpeg is not installed on this server. Video compression is unavailable.")
         
         cmd = [
-            "ffmpeg", "-y", "-i", input_path,
+            FFMPEG_EXE, "-y", "-i", input_path,
             "-vf", "scale='min(1280,iw)':-2",
             "-vcodec", "libx264", "-crf", "28", "-preset", "fast",
             "-acodec", "aac", "-b:a", "128k",
@@ -2288,7 +2375,7 @@ async def fetch_git_branches(platform, owner, repo, token=None):
         
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, proxy=proxy_url, timeout=15) as resp:
+            async with session.get(url, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     branches_data = await resp.json()
                     return [b.get("name") for b in branches_data]
@@ -2324,7 +2411,7 @@ async def render_git_explorer(message, url_id, user_id, edit=True):
                     if token:
                         headers["Authorization"] = f"token {token}"
                     url = f"https://api.github.com/repos/{owner}/{repo}"
-                    async with session.get(url, proxy=proxy_url, timeout=10) as r:
+                    async with session.get(url, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                         if r.status == 200:
                             repo_info = await r.json()
                             default_branch = repo_info.get("default_branch", "main")
@@ -2334,7 +2421,7 @@ async def render_git_explorer(message, url_id, user_id, edit=True):
                     import urllib.parse
                     project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
                     url = f"https://gitlab.com/api/v4/projects/{project_id}"
-                    async with session.get(url, proxy=proxy_url, timeout=10) as r:
+                    async with session.get(url, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                         if r.status == 200:
                             repo_info = await r.json()
                             default_branch = repo_info.get("default_branch", "master")
@@ -2357,7 +2444,7 @@ async def render_git_explorer(message, url_id, user_id, edit=True):
                     headers["Authorization"] = f"token {token}"
                 url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
                 params = {"ref": branch}
-                async with session.get(url, params=params, proxy=proxy_url, timeout=15) as resp:
+                async with session.get(url, params=params, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if isinstance(data, dict):
@@ -2378,7 +2465,7 @@ async def render_git_explorer(message, url_id, user_id, edit=True):
                 project_id = urllib.parse.quote_plus(f"{owner}/{repo}")
                 url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/tree"
                 params = {"path": path, "ref": branch}
-                async with session.get(url, params=params, proxy=proxy_url, timeout=15) as resp:
+                async with session.get(url, params=params, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         for item in data:
@@ -2545,56 +2632,105 @@ async def query_gemini(prompt: str) -> str:
     if not api_key:
         return "⚠️ AI Error: GEMINI_API_KEY is not set in .env file."
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    # Try multiple model names in order of preference
+    models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-2.0-flash",
+        "gemini-pro",
+    ]
+    
     proxy_url = get_proxy_url()
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "No response")
-                return f"⚠️ AI Error: {resp.status}"
-    except Exception as e:
-        return f"⚠️ AI Error: {e}"
+    
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}]
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, proxy=proxy_url, 
+                                       timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            if text:
+                                logger.info(f"Gemini success with model {model}")
+                                return text
+                    else:
+                        error_text = await resp.text()
+                        logger.warning(f"Gemini model {model} failed: {resp.status} - {error_text[:100]}")
+        except Exception as e:
+            logger.warning(f"Gemini model {model} exception: {e}")
+    
+    return "⚠️ AI Error: All Gemini models failed. Check your API key."
 
-async def query_agentrouter(prompt: str) -> str:
+async def query_agentrouter(prompt: str, model_override: str = None) -> str:
     import aiohttp
     import os
     api_key = (os.getenv("OPENROUTER_API_KEY") or os.getenv("AGENTROUTER_API_KEY") or "").strip()
     if not api_key:
         return "⚠️ AI Error: OPENROUTER_API_KEY or AGENTROUTER_API_KEY is not set in .env file."
     
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    payload = {
-        "model": "anthropic/claude-opus-4.6",
-        "messages": [{"role": "user", "content": prompt}]
+    # Map engine names to OpenRouter model IDs
+    engine_model_map = {
+        "claude": "anthropic/claude-3.5-sonnet",
+        "gpt4o": "openai/gpt-4o-mini",
+        "llama": "meta-llama/llama-3.1-8b-instruct",
+        "opus": "anthropic/claude-3-opus",
     }
+    
+    # If specific model requested, use it first
+    models_to_try = []
+    if model_override and model_override in engine_model_map:
+        models_to_try.append(engine_model_map[model_override])
+    
+    # Add fallback models
+    fallback_models = [
+        "anthropic/claude-3.5-sonnet",
+        "openai/gpt-4o-mini",
+        "google/gemini-2.0-flash-001",
+        "meta-llama/llama-3.1-8b-instruct",
+    ]
+    for m in fallback_models:
+        if m not in models_to_try:
+            models_to_try.append(m)
+    
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Authentication": f"Bearer {api_key}",
-        "x-api-key": api_key,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://techpulse.com",
         "X-Title": "TechPulse Bot"
     }
     proxy_url = get_proxy_url()
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    choices = data.get("choices", [])
-                    if choices:
-                        return choices[0].get("message", {}).get("content", "No response")
-                text_err = await resp.text()
-                return f"⚠️ AI Error {resp.status}: {text_err[:100]}"
-    except Exception as e:
-        return f"⚠️ AI Error: {e}"
+    
+    for model in models_to_try:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers, proxy=proxy_url,
+                                       timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        choices = data.get("choices", [])
+                        if choices:
+                            content = choices[0].get("message", {}).get("content", "")
+                            if content:
+                                logger.info(f"OpenRouter success with model {model}")
+                                return content
+                    else:
+                        error_text = await resp.text()
+                        logger.warning(f"OpenRouter model {model} failed: {resp.status} - {error_text[:100]}")
+        except Exception as e:
+            logger.warning(f"OpenRouter model {model} exception: {e}")
+    
+    return "⚠️ AI Error: All AI models failed. Check your API key."
 
 # =====================================================================
 # Main Message Handler (Inputs & Routing)
@@ -2645,8 +2781,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         elif state == 'AWAITING_TAG_EDIT':
-            # Format: Artist - Title - Album
-            parts = [p.strip() for p in text.split("-")]
+            # Format: Artist - Title - Album (split only on first 2 hyphens to preserve hyphens in names)
+            parts = [p.strip() for p in text.split(" - ", 2)]
             artist = parts[0] if len(parts) > 0 else "Unknown"
             title = parts[1] if len(parts) > 1 else "Unknown"
             album = parts[2] if len(parts) > 2 else "Unknown"
@@ -2665,7 +2801,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             URL_CACHE.pop(file_uuid, None)
             return
 
-    # Handle Bottom Menu Buttons
+    # Handle Bottom Menu Buttons - clear any pending states first
+    if text in ("🔍 YouTube Search", "🎵 Spotify Downloader", "🐙 Git Downloader", 
+                "🔄 File Converter", "📥 Direct Link Downloader", "🤖 AI Chat",
+                "📊 Statistics", "❓ Help & Guide"):
+        # Clear any pending interactive states when menu button is pressed
+        if user_id in USER_STATES:
+            state = USER_STATES[user_id].get('state', '')
+            if state in ('AWAITING_TRIM', 'AWAITING_SUBTITLE', 'AWAITING_TAG_EDIT',
+                        'AWAITING_PDF_PROTECT_PASS', 'AWAITING_PDF_UNLOCK_PASS',
+                        'AWAITING_PDF_ALBUM_IMAGES'):
+                USER_STATES.pop(user_id, None)
+
     if text == "🔍 YouTube Search":
         await message.reply_text(
             "🔎 *YouTube Search / جستجوی یوتیوب*\n"
@@ -2744,7 +2891,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton("✨ Google Gemini", callback_data="ai_engine:gemini"),
-                InlineKeyboardButton("🧠 Opus 4.6", callback_data="ai_engine:opus")
+                InlineKeyboardButton("🧠 Claude 3.5", callback_data="ai_engine:claude")
+            ],
+            [
+                InlineKeyboardButton("🤖 GPT-4o", callback_data="ai_engine:gpt4o"),
+                InlineKeyboardButton("🦙 Llama 3.1", callback_data="ai_engine:llama")
             ]
         ]
         await message.reply_text(
@@ -2839,19 +2990,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not urls:
         engine = USER_STATES.get(user_id, {}).get("ai_engine", "gemini")
-        engine_name = "Gemini" if engine == "gemini" else "Opus 4.6"
+        
+        engine_names = {
+            "gemini": "Gemini",
+            "claude": "Claude 3.5",
+            "gpt4o": "GPT-4o",
+            "llama": "Llama 3.1"
+        }
+        engine_name = engine_names.get(engine, "AI")
+        
         status_msg = await message.reply_text(f"🤖 *Thinking ({engine_name})... / در حال پردازش*", parse_mode="Markdown")
         try:
             await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
         except Exception:
             pass
-            
-        if engine == "opus":
-            response = await query_agentrouter(text)
+        
+        # Route to the correct AI engine
+        if engine == "gemini":
+            response = await query_gemini(text)
+        elif engine in ("claude", "gpt4o", "llama"):
+            # All non-Gemini engines use OpenRouter
+            response = await query_agentrouter(text, model_override=engine)
         else:
             response = await query_gemini(text)
         
-        # Format Gemini's Markdown to be more compatible with Telegram's legacy Markdown
+        # Format Markdown to be more compatible with Telegram's legacy Markdown
         formatted_text = response
         formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text) # Convert **bold** to *bold*
         formatted_text = re.sub(r'^###\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
@@ -2901,36 +3064,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Search YouTube for the track using Invidious (fallback to yt-dlp)
         loop = asyncio.get_running_loop()
         try:
-            yt_url = await search_youtube_invidious(f"{track_artist} - {track_title}")
+            yt_url = await search_youtube_invidious(f"{track_artist} {track_title}")
             
             if not yt_url:
                 logger.info("Invidious search failed. Falling back to yt-dlp search...")
                 def search_yt_track():
-                    search_query = f"ytsearch1:{track_artist} - {track_title}"
-                    ydl_opts = {
-                        'quiet': True,
-                        'no_warnings': True,
-                        'noplaylist': True,
-                        'extract_flat': True,
-                        **get_ydl_cookie_opts(),
-                        **get_site_specific_opts(search_query),
-                    }
-                    proxy_url = get_proxy_url()
-                    if proxy_url:
-                        ydl_opts["proxy"] = proxy_url
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(search_query, download=False)
-                        entries = info.get('entries', [])
-                        if entries:
-                            entry = entries[0]
-                            # Build proper watch URL
-                            yt_url = entry.get('url') or entry.get('webpage_url') or ''
-                            video_id = entry.get('id', '')
-                            if yt_url and not yt_url.startswith('http'):
-                                yt_url = f"https://www.youtube.com/watch?v={yt_url}"
-                            if not yt_url and video_id:
-                                yt_url = f"https://www.youtube.com/watch?v={video_id}"
-                            return yt_url or None
+                    for query_fmt in [
+                        f"ytsearch1:{track_artist} - {track_title}",
+                        f"ytsearch1:{track_artist} {track_title} official audio",
+                        f"ytsearch1:{track_title} {track_artist}",
+                    ]:
+                        ydl_opts = {
+                            'quiet': True,
+                            'no_warnings': True,
+                            'noplaylist': True,
+                            'extract_flat': True,
+                            **get_ydl_cookie_opts(),
+                            **get_site_specific_opts(query_fmt),
+                        }
+                        proxy_url = get_proxy_url()
+                        if proxy_url:
+                            ydl_opts["proxy"] = proxy_url
+                        try:
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(query_fmt, download=False)
+                                entries = info.get('entries', [])
+                                if entries:
+                                    entry = entries[0]
+                                    yt_url = entry.get('url') or entry.get('webpage_url') or ''
+                                    video_id = entry.get('id', '')
+                                    if yt_url and not yt_url.startswith('http'):
+                                        yt_url = f"https://www.youtube.com/watch?v={yt_url}"
+                                    if not yt_url and video_id:
+                                        yt_url = f"https://www.youtube.com/watch?v={video_id}"
+                                    if yt_url:
+                                        return yt_url
+                        except Exception as e:
+                            logger.warning(f"yt-dlp search failed for '{query_fmt}': {e}")
                     return None
                 
                 yt_url = await loop.run_in_executor(None, search_yt_track)
@@ -3205,7 +3375,7 @@ async def add_subtitle_conversion_to_queue(video_file_id, video_filename, srt_fi
                 output_path = os.path.join(temp_dir, "subbed_video.mp4")
                 
                 cmd = [
-                    "ffmpeg", "-y", "-i", "input.mp4",
+                    FFMPEG_EXE, "-y", "-i", "input.mp4",
                     "-vf", "subtitles=sub.srt",
                     "-c:v", "libx264", "-crf", "28", "-preset", "fast",
                     "-c:a", "copy",
@@ -3453,13 +3623,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split(":")
     action = data[0]
 
-    # Handle TechPulse Upload Option Callback
+    # Handle AI Engine Selection
     if action == "ai_engine":
         engine = data[1]
         if user_id not in USER_STATES:
             USER_STATES[user_id] = {}
         USER_STATES[user_id]['ai_engine'] = engine
-        engine_name = "✨ Google Gemini" if engine == "gemini" else "🧠 Opus 4.6 (AgentRouter)"
+        
+        engine_names = {
+            "gemini": "✨ Google Gemini",
+            "claude": "🧠 Claude 3.5 Sonnet",
+            "gpt4o": "🤖 GPT-4o",
+            "llama": "🦙 Llama 3.1"
+        }
+        engine_name = engine_names.get(engine, engine)
+        
         await query.message.edit_text(
             f"✅ AI Engine set to: *{engine_name}*\n\n"
             f"Now send me any text message to chat! / برای شروع مکالمه یک متن ارسال کنید:",
@@ -4048,34 +4226,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guide_texts = {
             'compress': (
                 "📉 *Video Compressor / فشرده‌سازی ویدیو* 📉\n\n"
-                "To compress a video file, please **upload/send the video file** directly to the bot now.\n\n"
+                "To compress a video file, please *upload/send the video file* directly to the bot now.\n\n"
                 "I will automatically detect it and show you quality compression options."
             ),
             'sub': (
                 "🎬 *Subtitle Burner / هاردکد کردن زیرنویس* 🎬\n\n"
                 "To burn subtitles into a video:\n"
-                "1. First, **upload/send the video file** directly to this bot.\n"
-                "2. When the options keyboard appears, click **Add Subtitle (زیرنویس)**.\n"
+                "1. First, *upload/send the video file* directly to this bot.\n"
+                "2. When the options keyboard appears, click *Add Subtitle (زیرنویس)*.\n"
                 "3. You will then be prompted to send the `.srt` subtitle file."
             ),
             'vfx': (
                 "🎭 *Voice & Audio Effects / افکت‌های صدا* 🎭\n\n"
                 "To apply fun voice effects (Alien, Chipmunk, Robot, Echo):\n"
-                "1. **Upload/send your audio or voice message** file directly to the bot.\n"
-                "2. Click **Voice Effects** on the conversion options menu."
+                "1. *Upload/send your audio or voice message* file directly to the bot.\n"
+                "2. Click *Voice Effects* on the conversion options menu."
             ),
             'tags': (
                 "🏷 *Music Tag Editor / ویرایشگر تگ* 🏷\n\n"
                 "To edit MP3 album, artist, and title metadata tags:\n"
-                "1. **Upload/send your MP3/audio file** to the bot.\n"
-                "2. Click **Edit Tags** on the options keyboard.\n"
+                "1. *Upload/send your MP3/audio file* to the bot.\n"
+                "2. Click *Edit Tags* on the options keyboard.\n"
                 "3. Enter the tags in the requested format."
             ),
             'pdfsec': (
                 "🔒 *PDF Security / امنیت پی‌دی‌اف* 🔒\n\n"
                 "To lock (encrypt) or unlock (decrypt) a PDF file:\n"
-                "1. **Upload/send your PDF file** directly to the bot.\n"
-                "2. Select **Protect PDF** or **Unlock PDF** on the options keyboard.\n"
+                "1. *Upload/send your PDF file* directly to the bot.\n"
+                "2. Select *Protect PDF* or *Unlock PDF* on the options keyboard.\n"
                 "3. Enter the desired password."
             )
         }
@@ -4105,6 +4283,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "pdfalbum_build_active":
         album = USER_STATES.get(user_id, {}).get('pdf_album', [])
         if not album:
+            USER_STATES.pop(user_id, None)  # Clear stale state
             await query.edit_message_text("❌ No images in PDF album. Please send some images first!")
             return
 
@@ -4352,12 +4531,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_t = cached.get('start_time')
         end_t = cached.get('end_time')
         as_gif = (choice == "gif")
+        is_web_upload = (choice == "web")
+        
+        # When uploading to web, use None format_opt to trigger direct HTTP download instead of yt-dlp
+        if is_web_upload:
+            fmt_opt = None
+        elif choice == "audio":
+            fmt_opt = "audio"
+        else:
+            fmt_opt = "video"
         
         await query.edit_message_text("⏳ *Adding to download queue... / اضافه شدن به صف*", parse_mode="Markdown")
         await add_to_queue(
             url=url,
             message_to_reply=query.message,
-            format_opt="audio" if choice == "audio" else "video",
+            format_opt=fmt_opt,
             custom_name=None,
             start_time=start_t,
             end_time=end_t,
@@ -4365,7 +4553,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cached_title=cached['title'],
             cached_thumb=cached['thumbnail'],
             user_id=user_id,
-            upload_mode="web" if choice == "web" else None
+            upload_mode="web" if is_web_upload else None
         )
         URL_CACHE.pop(url_id, None)
 
@@ -4527,6 +4715,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_uuid = data[1]
         album = USER_STATES.get(user_id, {}).get('pdf_album', [])
         if not album:
+            USER_STATES.pop(user_id, None)  # Clear stale state
             await query.edit_message_text("❌ No images in PDF album.")
             return
             
@@ -4646,7 +4835,7 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                         await status_msg.edit_text("🌐 *Uploading file to Uplod.ir... / در حال آپلود به سرور وب*", parse_mode="Markdown")
                         web_link = await upload_to_uplod_ir(filepath)
                         if web_link:
-                            await status_msg.edit_text(f"✅ *Upload Successful! / آپلود موفق*\n\n📥 **Download Link:** {web_link}", parse_mode="Markdown", disable_web_page_preview=True)
+                             await status_msg.edit_text(f"✅ *Upload Successful! / آپلود موفق*\n\n📥 *Download Link:* {web_link}", parse_mode="Markdown", disable_web_page_preview=True)
                         else:
                             await status_msg.edit_text("❌ *Failed to upload file to Uplod.ir.*")
                     else:
@@ -4847,16 +5036,20 @@ async def add_conversion_to_queue(file_id, filename, target_format, message_to_r
 
 # context_bot_wrapper is defined earlier in the file (before ProgressTracker)
 
+_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
 async def queue_worker(bot):
-    """Processes downloads sequentially from queue. Auto-restarts on crash."""
+    """Processes downloads with controlled concurrency from queue."""
     while True:
         task = await download_queue.get()
-        try:
-            await task()
-        except Exception as e:
-            logger.error(f"Queue task error: {e}", exc_info=True)
-        finally:
-            download_queue.task_done()
+        async def _run_task(t):
+            async with _download_semaphore:
+                try:
+                    await t()
+                except Exception as e:
+                    logger.error(f"Queue task error: {e}", exc_info=True)
+        asyncio.create_task(_run_task(task))
+        download_queue.task_done()
 
 # =====================================================================
 # Main runner (Standard Polling & Async Web Server Mode)
@@ -4903,7 +5096,7 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mod_time = time.ctime(os.path.getmtime(COOKIES_FILE))
         await update.message.reply_text(
             f"🍪 *Cookies Status*\n\n"
-            f"✅ `cookies.txt` is **active**\n"
+            f"✅ `cookies.txt` is *active*\n"
             f"📦 Size: `{size} bytes`\n"
             f"🕐 Last updated: `{mod_time}`\n\n"
             f"To update: send a new `cookies.txt` file to the bot.",
@@ -4912,13 +5105,13 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             f"🍪 *Cookies Setup*\n\n"
-            f"❌ No `cookies.txt` found — bot detection is **active** on YouTube/PornHub.\n\n"
+            f"❌ No `cookies.txt` found — bot detection is *active* on YouTube/PornHub.\n\n"
             f"*To fix YouTube/PornHub bot detection:*\n"
             f"1️⃣ Install browser extension: *Get cookies.txt LOCALLY*\n"
             f"   (Chrome: https://chrome.google.com/webstore)\n"
-            f"2️⃣ Visit youtube.com while **logged in**\n"
+            f"2️⃣ Visit youtube.com while *logged in*\n"
             f"3️⃣ Export cookies as `cookies.txt`\n"
-            f"4️⃣ Send the `cookies.txt` file **directly to this bot**\n\n"
+            f"4️⃣ Send the `cookies.txt` file *directly to this bot*\n\n"
             f"📁 File will be saved as: `{COOKIES_FILE}`",
             parse_mode="Markdown",
             disable_web_page_preview=True
@@ -4995,7 +5188,7 @@ async def local_main_async(application):
 def main():
     if not BOT_TOKEN or "YOUR_TELEGRAM_BOT_TOKEN_HERE" in BOT_TOKEN:
         print("❌ Error: TELEGRAM_BOT_TOKEN is not set in .env file!")
-        print("Please edit c:/Users/Admin/Desktop/telegram-downloader-bot/.env and put your bot token.")
+        print(f"Please edit the .env file in {BASE_DIR} and set TELEGRAM_BOT_TOKEN.")
         return
 
     logger.info("Starting Telegram Bot...")
@@ -5014,6 +5207,7 @@ def main():
     application.add_handler(CommandHandler("gitlab_token", gitlab_token_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("cookies", cookies_command))
+    application.add_handler(CommandHandler("direct", direct_command))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
     # Catch textual requests (including URLs)
