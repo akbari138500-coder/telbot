@@ -2975,15 +2975,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration_str = f"{format_seconds(start_sec)} to {format_seconds(end_sec)} ({end_sec - start_sec}s)"
         keyboard = [
             [
-                InlineKeyboardButton("🎥 Video Segment", callback_data=f"dl:{url_id}:video"),
-                InlineKeyboardButton("🎵 Audio (MP3) Segment", callback_data=f"dl:{url_id}:audio")
+                InlineKeyboardButton("🎥 Video Segment", callback_data=f"dmethod:{url_id}:video"),
+                InlineKeyboardButton("🎵 Audio (MP3) Segment", callback_data=f"dmethod:{url_id}:audio")
             ],
             [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
         ]
         
         # Add GIF option if duration <= 15s
         if (end_sec - start_sec) <= 15:
-            keyboard[0].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dl:{url_id}:gif"))
+            keyboard[0].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dmethod:{url_id}:gif"))
 
         await message.reply_text(
             f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
@@ -3139,18 +3139,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("❌ *Song not found on YouTube search.*")
                 return
                 
-            # Add to Queue as MP3 download!
+            # Store Spotify info and ask delivery method
+            spotify_id = uuid.uuid4().hex[:8]
+            URL_CACHE[spotify_id] = {
+                'url': yt_url,
+                'title': f"{track_artist} - {track_title}",
+                'thumbnail': track_thumb,
+                'duration': 0,
+                'start_time': None,
+                'end_time': None,
+                'audio_title': track_title,
+                'audio_performer': track_artist
+            }
             await status_msg.delete()
-            await add_to_queue(
-                url=yt_url,
-                message_to_reply=message,
-                format_opt="audio",
-                custom_name=f"{track_artist} - {track_title}",
-                cached_title=f"{track_artist} - {track_title}",
-                cached_thumb=track_thumb,
-                user_id=user_id,
-                audio_title=track_title,
-                audio_performer=track_artist
+            keyboard = [
+                [
+                    InlineKeyboardButton("📱 Send to Telegram", callback_data=f"dl:{spotify_id}:audio:tg"),
+                    InlineKeyboardButton("🌐 Upload to uplod.ir", callback_data=f"dl:{spotify_id}:audio:web")
+                ],
+                [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{spotify_id}:cancel")]
+            ]
+            await message.reply_text(
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  🎵  *SPOTIFY TRACK*     ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"🎵 `{track_artist} - {track_title}`\n\n"
+                f"How do you want to receive the file?\n"
+                f"فایل رو چطوری تحویل بگیرید?\n\n"
+                f"{THIN_DIVIDER}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
             )
             return
         except Exception as e:
@@ -3251,22 +3269,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             keyboard = [
                 [
-                    InlineKeyboardButton("🎥 Video (ویدیو)", callback_data=f"dl:{url_id}:video"),
+                    InlineKeyboardButton("🎥 Video (ویدیو)", callback_data=f"dmethod:{url_id}:video"),
                     InlineKeyboardButton("⚙️ Resolution (کیفیت)", callback_data=f"resopts:{url_id}")
                 ],
                 [
-                    InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dl:{url_id}:audio"),
-                    InlineKeyboardButton("🌐 Upload to Web (مستقیم)", callback_data=f"dl:{url_id}:web")
-                ],
-                [
+                    InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dmethod:{url_id}:audio"),
                     InlineKeyboardButton("✂️ Trim Range (برش)", callback_data=f"dl:{url_id}:trim"),
-                    InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")
-                ]
+                ],
+                [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
             ]
             
             # Add GIF option directly if video <= 15s
             if duration and duration <= 15:
-                keyboard[1].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dl:{url_id}:gif"))
+                keyboard[1].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dmethod:{url_id}:gif"))
             
             await status_msg.delete()
             await message.reply_text(
@@ -4461,12 +4476,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = [
             [
-                InlineKeyboardButton("🎥 1080p (Full HD)", callback_data=f"resdl:{url_id}:1080p"),
-                InlineKeyboardButton("🎥 720p (HD)", callback_data=f"resdl:{url_id}:720p")
+                InlineKeyboardButton("🎥 1080p (Full HD)", callback_data=f"dmethod:{url_id}:1080p"),
+                InlineKeyboardButton("🎥 720p (HD)", callback_data=f"dmethod:{url_id}:720p")
             ],
             [
-                InlineKeyboardButton("🎥 480p (Medium)", callback_data=f"resdl:{url_id}:480p"),
-                InlineKeyboardButton("🎥 360p (Low)", callback_data=f"resdl:{url_id}:360p")
+                InlineKeyboardButton("🎥 480p (Medium)", callback_data=f"dmethod:{url_id}:480p"),
+                InlineKeyboardButton("🎥 360p (Low)", callback_data=f"dmethod:{url_id}:360p")
             ],
             [
                 InlineKeyboardButton("◀️ Back (بازگشت)", callback_data=f"opt:{url_id}")
@@ -4522,17 +4537,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = [
             [
-                InlineKeyboardButton("🎥 Video (ویدیو)", callback_data=f"dl:{url_id}:video"),
+                InlineKeyboardButton("🎥 Video (ویدیو)", callback_data=f"dmethod:{url_id}:video"),
                 InlineKeyboardButton("⚙️ Resolution (کیفیت)", callback_data=f"resopts:{url_id}")
             ],
             [
-                InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dl:{url_id}:audio"),
+                InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dmethod:{url_id}:audio"),
                 InlineKeyboardButton("✂️ Trim Range (برش)", callback_data=f"dl:{url_id}:trim"),
             ],
             [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
         ]
         if cached.get('duration') and cached['duration'] <= 15:
-            keyboard[1].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dl:{url_id}:gif"))
+            keyboard[1].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dmethod:{url_id}:gif"))
 
         duration_str = f"{format_seconds(cached['duration'])}" if cached.get('duration') else "unknown"
         await query.edit_message_text(
@@ -4563,10 +4578,52 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         URL_CACHE.pop(url_id, None)
         return
 
+    # Handle Download Method Selection (Telegram vs uplod.ir)
+    if action == "dmethod":
+        url_id = data[1]
+        format_choice = data[2]
+        cached = URL_CACHE.get(url_id)
+        if not cached:
+            await query.edit_message_text("❌ Session expired. Send link again.")
+            return
+
+        format_labels = {
+            "video": "🎥 Video",
+            "audio": "🎵 MP3 Audio",
+            "gif": "🖼 GIF",
+            "1080p": "🎥 1080p Video",
+            "720p": "🎥 720p Video",
+            "480p": "🎥 480p Video",
+            "360p": "🎥 360p Video",
+        }
+        label = format_labels.get(format_choice, format_choice)
+
+        keyboard = [
+            [
+                InlineKeyboardButton("📱 Send to Telegram", callback_data=f"dl:{url_id}:{format_choice}:tg"),
+                InlineKeyboardButton("🌐 Upload to uplod.ir", callback_data=f"dl:{url_id}:{format_choice}:web")
+            ],
+            [InlineKeyboardButton("◀️ Back (بازگشت)", callback_data=f"opt:{url_id}")]
+        ]
+        await query.edit_message_text(
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃  📤  *DELIVERY METHOD*    ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            f"🎥 `{cached['title']}`\n"
+            f"📋 Format: *{label}*\n\n"
+            f"How do you want to receive the file?\n"
+            f"فایل رو چطوری تحویل بگیرید؟\n\n"
+            f"{THIN_DIVIDER}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return
+
     # Handle Direct Downloads / Cancellations / Trims
     if action == "dl":
         url_id = data[1]
         choice = data[2]
+        delivery = data[3] if len(data) > 3 else None
         cached = URL_CACHE.get(url_id)
 
         if not cached:
@@ -4600,13 +4657,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_t = cached.get('start_time')
         end_t = cached.get('end_time')
         as_gif = (choice == "gif")
-        is_web_upload = (choice == "web")
+        is_web_upload = (delivery == "web")
         
-        # When uploading to web, use None format_opt to trigger direct HTTP download instead of yt-dlp
-        if is_web_upload:
-            fmt_opt = None
-        elif choice == "audio":
+        if choice == "audio":
             fmt_opt = "audio"
+        elif choice in ("1080p", "720p", "480p", "360p"):
+            fmt_opt = choice
+        elif choice == "file":
+            fmt_opt = None
         else:
             fmt_opt = "video"
         
@@ -4622,7 +4680,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cached_title=cached['title'],
             cached_thumb=cached['thumbnail'],
             user_id=user_id,
-            upload_mode="web" if is_web_upload else None
+            upload_mode="web" if is_web_upload else None,
+            audio_title=cached.get('audio_title'),
+            audio_performer=cached.get('audio_performer')
         )
         URL_CACHE.pop(url_id, None)
 
