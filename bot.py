@@ -146,7 +146,8 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_PART_SIZE = 48 * 1024 * 1024  # 48MB hard limit (Telegram rejects at 50MB)
-DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+DIVIDER = "══════════════════════════"
+THIN_DIVIDER = "────────────────────────────"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt"))  # Path to cookies.txt for bot detection bypass
 
@@ -987,16 +988,17 @@ def yt_dlp_hook(d, tracker):
         bar = get_progress_bar(percent) if total else "`Downloading...`"
         
         text = (
-            f"📥 *DOWNLOADING MEDIA / در حال دانلود* 📥\n"
-            f"{DIVIDER}\n"
-            f"📁 *Name:* `{filename[:35]}`\n"
-            f"⚡ *Progress:* {bar}\n"
-            f"📦 *Downloaded:* `{downloaded_mb:.1f} MB` / `{total_mb:.1f} MB`\n"
-            f"🚀 *Speed:* `{speed_mb:.2f} MB/s`"
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃   📥  *DOWNLOADING*        ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            f"📁 `{filename[:35]}`\n"
+            f"⚡ {bar}\n"
+            f"📦 `{downloaded_mb:.1f} MB` / `{total_mb:.1f} MB`\n"
+            f"🚀 `{speed_mb:.2f} MB/s`"
         )
         tracker.update(text)
     elif d["status"] == "finished":
-        tracker.update("📥 *Download finished! Processing file... / در حال پردازش فایل*")
+        tracker.update("📥 *Download finished! Processing...*")
 
 class context_bot_wrapper:
     """Wraps a message object to provide edit_message_text compatible with ProgressTracker."""
@@ -1112,8 +1114,9 @@ async def download_direct_resilient(url, filepath, progress_message, bot, custom
                                 downloaded_str = f"{downloaded / (1024*1024):.1f} MB"
                                 bar_str = get_progress_bar(percent) if total_size > 0 else "`Downloading...`"
                                 text = (
-                                    f"📥 *DOWNLOADING / دانلود لینک مستقیم*\n"
-                                    f"{DIVIDER}\n"
+                                    f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                                    f"┃  📥  *DIRECT DOWNLOAD*   ┃\n"
+                                    f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
                                     f"📁 `{os.path.basename(filepath)[:40]}`\n"
                                     f"⚡ {bar_str}\n"
                                     f"📦 `{downloaded_str}` / `{total_str}`"
@@ -1819,7 +1822,7 @@ async def setup_cloud_button(bot, chat_id, message_id):
     keyboard = [[InlineKeyboardButton("☁️ Archive to Cloud Channel", callback_data=f"cloud:{message_id}")]]
     await bot.send_message(
         chat_id=chat_id,
-        text="💾 *Cloud Archiving available / آرشیو ابری:*",
+        text="☁️ *Cloud Archiving available:*",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -1830,38 +1833,40 @@ async def setup_cloud_button(bot, chat_id, message_id):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends welcome message and instructions with premium visual layout."""
     welcome_text = (
-        f"🌟 *S E N I O R  D O W N L O A D E R* 🌟\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Welcome to the ultimate media & utility bot! 🚀\n"
-        f"به پیشرفته‌ترین ربات دانلودر و دستیار هوشمند خوش آمدید.\n\n"
-        f"✨ *Q U I C K  G U I D E  /  راهـنـمـای سـریـع:*\n"
-        f"🔹 *Media / رسانه:* Send any YouTube, Insta, or TikTok link.\n"
-        f"🔹 *Music / موزیک:* Send a Spotify link to get the MP3.\n"
-        f"🔹 *Files / فایل:* Send any file/photo to see conversion options.\n"
-        f"🔹 *Code / برنامه‌نویسی:* Send a GitHub/GitLab link to download it.\n"
-        f"🔹 *AI / هوش مصنوعی:* Click on AI Chat to start talking.\n\n"
-        f"💡 *Commands / دستورات:*\n"
-        f"🔸 `/search <name>` : Search YouTube videos\n"
-        f"🔸 `/direct <url>` : Force download direct files\n"
-        f"🔸 `/stats` : View your usage statistics\n\n"
-        f"👇 *Choose an option from the menu below:* / از منوی زیر انتخاب کنید:"
+        f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"┃  🌟  *S E N I O R*  🌟  ┃\n"
+        f"┃   𝗗 𝗢 𝗪 𝗡 𝗟 𝗢 𝗔 𝗗 𝗘 𝗥   ┃\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"✨ _The ultimate media & utility bot_\n"
+        f"پیشرفته‌ترین ربات دانلودر و دستیار هوشمند\n\n"
+        f"{THIN_DIVIDER}\n"
+        f"  🔹 *Media / رسانه* — Send any YouTube, Insta, or TikTok link\n"
+        f"  🔹 *Music / موزیک* — Send a Spotify link to get MP3\n"
+        f"  🔹 *Files / فایل* — Send any file/photo to convert\n"
+        f"  🔹 *Code / کدنویسی* — Send a GitHub/GitLab link\n"
+        f"  🔹 *AI / هوش مصنوعی* — Click AI Chat to start talking\n"
+        f"{THIN_DIVIDER}\n"
+        f"💡 *Quick Commands:*\n"
+        f"  `/search <name>` — Search YouTube\n"
+        f"  `/direct <url>` — Force direct download\n"
+        f"  `/stats` — View your statistics\n"
+        f"{THIN_DIVIDER}\n"
+        f"👇 _Choose an option from the menu below:_"
     )
     keyboard = [
         [
-            KeyboardButton("🔍 YouTube Search"),
-            KeyboardButton("🎵 Spotify Downloader")
+            KeyboardButton("🔍 YouTube"),
+            KeyboardButton("🎵 Spotify"),
+            KeyboardButton("🐙 Git")
         ],
         [
-            KeyboardButton("🐙 Git Downloader"),
-            KeyboardButton("🔄 File Converter")
-        ],
-        [
-            KeyboardButton("📥 Direct Link Downloader"),
+            KeyboardButton("📥 Direct DL"),
+            KeyboardButton("🔄 Converter"),
             KeyboardButton("🤖 AI Chat")
         ],
         [
-            KeyboardButton("📊 Statistics"),
-            KeyboardButton("❓ Help & Guide")
+            KeyboardButton("📊 Stats"),
+            KeyboardButton("❓ Help")
         ]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -1901,7 +1906,7 @@ async def render_search_page(message, query, page, query_uuid, edit=False):
                 await message.reply_text("❌ No results found.")
             return
 
-        text = f"🔍 *YOUTUBE SEARCH / جستجوی یوتیوب*\n{DIVIDER}\nQuery: `{query}`\nPage: `{page}`\n\n"
+        text = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  🔍  *YOUTUBE RESULTS*   ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n🔍 *Query:* `{query}`  •  📄 *Page:* `{page}`\n\n"
         keyboard = []
         download_buttons = []
         
@@ -1918,7 +1923,7 @@ async def render_search_page(message, query, page, query_uuid, edit=False):
             if not video_url:
                 continue
             title_display = title[:50] + ('...' if len(title) > 50 else '')
-            text += f"{global_idx}️⃣ *{title_display}*\n      └─ 🔗 `{video_url}`\n\n"
+            text += f"  {global_idx}️⃣  *{title_display}*\n          └─ `{video_url}`\n\n"
 
             url_id = uuid.uuid4().hex[:8]
             URL_CACHE[url_id] = {
@@ -2491,12 +2496,11 @@ async def render_git_explorer(message, url_id, user_id, edit=True):
     cached['items'] = items
 
     text = (
-        f"🐙 *GIT EXPLORER / اکسپلورر گیت* 🐙\n"
-        f"{DIVIDER}\n"
-        f"🌐 *Platform:* `{platform.upper()}`\n"
-        f"📦 *Repository:* `{owner}/{repo}`\n"
-        f"🌿 *Branch:* `{branch}`\n"
-        f"📁 *Path:* `/{path}`\n"
+        f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"┃  🐙  *GIT EXPLORER*       ┃\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"🌐 `{platform.upper()}`  •  📦 `{owner}/{repo}`\n"
+        f"🌿 Branch: `{branch}`  •  📁 `/{path}`"
     )
     
     if error_msg:
@@ -2610,11 +2614,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     size_mb = total_size / (1024 * 1024)
     
     text = (
-        f"📊 *STATISTICS / آمار مصرف* 📊\n"
-        f"{DIVIDER}\n"
-        f"👤 *Your Usage / مصرف شما:*\n"
-        f" ├─ *Files Processed:* `{count}`\n"
-        f" └─ *Bandwidth Used:* `{size_mb:.2f} MB`"
+        f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"┃  📊  *STATISTICS*         ┃\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"👤 *Your Usage:*\n"
+        f"  ├─ Files Processed: `{count}`\n"
+        f"  └─ Bandwidth Used: `{size_mb:.2f} MB`"
     )
     
     # Check if user is Admin and requested global stats
@@ -2622,10 +2627,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         g_count, g_size, g_users = db.get_global_stats()
         g_size_gb = g_size / (1024 * 1024 * 1024)
         text += (
-            f"\n\n⚙️ *Global System Admin stats / آمار کل سیستم:*\n"
-            f" ├─ *Active Userbase:* `{g_users}` users\n"
-            f" ├─ *Global Files:* `{g_count}`\n"
-            f" └─ *Global Bandwidth:* `{g_size_gb:.2f} GB`"
+            f"\n\n⚙️ *Global System Stats:*\n"
+            f"  ├─ Users: `{g_users}`\n"
+            f"  ├─ Files: `{g_count}`\n"
+            f"  └─ Bandwidth: `{g_size_gb:.2f} GB`"
         )
         
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -2807,9 +2812,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # Handle Bottom Menu Buttons - clear any pending states first
-    if text in ("🔍 YouTube Search", "🎵 Spotify Downloader", "🐙 Git Downloader", 
-                "🔄 File Converter", "📥 Direct Link Downloader", "🤖 AI Chat",
-                "📊 Statistics", "❓ Help & Guide"):
+    if text in ("🔍 YouTube", "🎵 Spotify", "🐙 Git", 
+                "📥 Direct DL", "🔄 Converter", "🤖 AI Chat",
+                "📊 Stats", "❓ Help"):
         # Clear any pending interactive states when menu button is pressed
         if user_id in USER_STATES:
             state = USER_STATES[user_id].get('state', '')
@@ -2818,13 +2823,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         'AWAITING_PDF_ALBUM_IMAGES'):
                 USER_STATES.pop(user_id, None)
 
-    if text == "🔍 YouTube Search":
+    if text == "🔍 YouTube":
         await message.reply_text(
-            "🔎 *YouTube Search / جستجوی یوتیوب*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "You can search for any video right here!\n\n"
-            "⌨️ *Usage:* `/search <query>`\n"
-            "📌 *Example:* `/search interstellar soundtrack`", 
+            "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            "┃   🔍  *YOUTUBE SEARCH*   ┃\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            "Search for any video and download in HQ!\n"
+            "جستجو و دانلود با کیفیت بالا\n\n"
+            f"{THIN_DIVIDER}\n"
+            "⌨️ *Usage:*  `/search <query>`\n"
+            "📌 *Example:*  `/search interstellar soundtrack`",
             parse_mode="Markdown"
         )
         return
@@ -2838,64 +2846,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
-    elif text == "🎵 Spotify Downloader":
+    elif text == "🎵 Spotify":
         await message.reply_text(
-            "🎵 *Spotify Downloader / اسپاتیفای*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Get high-quality MP3s straight from Spotify!\n\n"
-            "✨ *How it works:*\n"
-            "Just paste the Spotify Track Link. I will fetch the metadata, download the song, and attach the original album cover!\n\n"
-            "📌 *Example:* `https://open.spotify.com/track/4PTG3Z6ehGkBF3zI7YkR5C`", 
+            "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            "┃   🎵  *SPOTIFY DL*       ┃\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            "Get high-quality MP3s from Spotify!\n"
+            "دانلود با کیفیت بالا از اسپاتیفای\n\n"
+            f"{THIN_DIVIDER}\n"
+            "📌 _Just paste the Spotify Track Link_\n"
+            "I will fetch metadata, download the song,\n"
+            "and attach the original album cover!\n\n"
+            f"`https://open.spotify.com/track/4PTG3Z6ehGkBF3zI7YkR5C`",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
         return
-    elif text == "🐙 Git Downloader":
+    elif text == "🐙 Git":
         await message.reply_text(
-            "🐙 *Git Downloader / دانلودر گیت*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Download Repositories, Folders, Files, or Releases from GitHub & GitLab.\n\n"
-            "💡 *How to use:*\n"
-            "Send the URL of any repo, folder, or file.\n\n"
+            "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            "┃   🐙  *GIT DOWNLOADER*   ┃\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            "Download repos, folders, files & releases\n"
+            "from GitHub & GitLab.\n\n"
+            f"{THIN_DIVIDER}\n"
+            "💡 _Send any repo, folder, or file URL_\n\n"
             "📝 *Examples:*\n"
-            "🔹 Repo: `https://github.com/owner/repo`\n"
-            "🔹 Folder: `.../repo/tree/main/src`\n\n"
-            "🔑 *Private Repositories:*\n"
-            "Use `/github_token <your_token>` or `/gitlab_token <your_token>` to set your access.",
+            "  Repo: `https://github.com/owner/repo`\n"
+            "  Folder: `.../repo/tree/main/src`\n\n"
+            "🔑 *Private Repos:*\n"
+            "  `/github_token <token>`\n"
+            "  `/gitlab_token <token>`",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
         return
-    elif text == "📥 Direct Link Downloader":
+    elif text == "📥 Direct DL":
         await message.reply_text(
-            "📥 *Direct Downloader / دانلود لینک مستقیم*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Download any file from the web seamlessly.\n\n"
-            "💡 *How to use:*\n"
-            "1️⃣ Send the direct file link. (like `.zip`, `.mp4`)\n"
-            "2️⃣ Or force download any link using the command below:\n\n"
-            "⌨️ *Usage:* `/direct <url> [--name custom_name.ext]`\n"
-            "📌 *Example:* `/direct https://example.com/data --name info.zip`",
+            "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            "┃  📥  *DIRECT DOWNLOADER*  ┃\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            "Download any file from the web.\n"
+            "دانلود مستقیم فایل از وب\n\n"
+            f"{THIN_DIVIDER}\n"
+            "💡 _Send any direct file link_\n"
+            "   (`.zip`, `.mp4`, `.pdf`, etc.)\n\n"
+            "⌨️ *Command:*\n"
+            "`/direct <url> [--name file.ext]`\n\n"
+            "📌 *Example:*\n"
+            "`/direct https://example.com/data --name info.zip`",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
         return
-    elif text == "🔄 File Converter":
+    elif text == "🔄 Converter":
         await message.reply_text(
-            "🔄 *File Converter / مبدل قدرتمند فرمت‌ها*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "I can convert almost anything! Just forward or upload a file directly to me.\n\n"
-            "🎨 *Images:* PNG, JPG, WebP, PDF\n"
-            "🎧 *Audio:* MP3, WAV, OGG, Voice Effects\n"
-            "🎥 *Video:* Extract MP3, GIF, Compress\n"
-            "📄 *Docs:* DOCX to PDF, PDF to Text, Unlock PDF", 
+            "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            "┃  🔄  *FILE CONVERTER*     ┃\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            "Convert almost anything! Just send a file.\n"
+            "تبدیل فرمت فایل‌ها — فقط فایل را بفرستید\n\n"
+            f"{THIN_DIVIDER}\n"
+            "🎨 *Images:*  PNG, JPG, WebP, PDF\n"
+            "🎧 *Audio:*  MP3, WAV, OGG, Voice Effects\n"
+            "🎥 *Video:*  Extract MP3, GIF, Compress\n"
+            "📄 *Docs:*  DOCX→PDF, PDF→Text, Lock/Unlock PDF",
             parse_mode="Markdown"
         )
         return
     elif text == "🤖 AI Chat":
         keyboard = [
             [
-                InlineKeyboardButton("✨ Google Gemini", callback_data="ai_engine:gemini"),
+                InlineKeyboardButton("✨ Gemini", callback_data="ai_engine:gemini"),
                 InlineKeyboardButton("🧠 Claude 3.5", callback_data="ai_engine:claude")
             ],
             [
@@ -2904,18 +2926,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await message.reply_text(
-            "🤖 *AI Assistant / دستیار هوشمند*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Choose your preferred AI Engine below.\n"
-            "لطفاً موتور هوش مصنوعی خود را برای مکالمه انتخاب کنید:", 
+            "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            "┃   🤖  *AI ASSISTANT*      ┃\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            "Choose your AI engine below.\n"
+            "موتور هوش مصنوعی خود را انتخاب کنید:\n\n"
+            f"{THIN_DIVIDER}",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
         return
-    elif text == "📊 Statistics":
+    elif text == "📊 Stats":
         await stats_command(update, context)
         return
-    elif text == "❓ Help & Guide":
+    elif text == "❓ Help":
         await start_command(update, context)
         return
 
@@ -2962,7 +2986,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard[0].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dl:{url_id}:gif"))
 
         await message.reply_text(
-            f"✂️ *TRIM WINDOW SELECTED / بازه زمانی انتخاب شده:*\n`{duration_str}`\n🎥 *Media:* `{cached['title']}`\n\n*Choose format:*",
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃  ✂️  *TRIM SELECTED*       ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            f"⏱ `{duration_str}`\n"
+            f"🎥 `{cached['title']}`\n\n"
+            f"👇 _Choose format:_",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -3026,13 +3055,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
         formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
         
-        final_msg = f"✨ *{engine_name} AI*\n{DIVIDER}\n{formatted_text}"
+        final_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  *{engine_name}*          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{formatted_text}"
         
         try:
             await status_msg.edit_text(final_msg, parse_mode="Markdown")
         except Exception as e:
             # Fallback to plain text if Telegram markdown parser fails (due to unclosed tags)
-            plain_msg = f"✨ {engine_name} AI\n{DIVIDER}\n{response}"
+            plain_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  {engine_name}          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{response}"
             await status_msg.edit_text(plain_msg)
         return
 
@@ -3207,11 +3236,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
                 await status_msg.delete()
                 await message.reply_text(
-                    f"📦 *PLAYLIST DETECTED / پلی‌لیست* 📦\n"
-                    f"{DIVIDER}\n"
-                    f"📚 *Title:* `{info.get('title', 'Album')}`\n"
-                    f"🔢 *Count:* `{len(entries)}` videos\n\n"
-                    f"👇 *Choose strategy:* / یکی از گزینه‌ها را انتخاب کنید:",
+                    f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                    f"┃  📦  *PLAYLIST FOUND*     ┃\n"
+                    f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                    f"📚 `{info.get('title', 'Album')}`\n"
+                    f"🔢 `{len(entries)}` videos\n\n"
+                    f"👇 _Choose download strategy:_",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown"
                 )
@@ -3242,11 +3272,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await status_msg.delete()
             await message.reply_text(
-                f"✨ *MEDIA METADATA / اطلاعات رسانه* ✨\n"
-                f"{DIVIDER}\n"
-                f"📝 *Title:* `{info.get('title', 'Social Media File')}`\n"
-                f"⏱ *Duration:* `{duration_str}`\n\n"
-                f"👇 *Choose action:* / یکی از گزینه‌ها را انتخاب کنید:",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  ✨  *MEDIA INFO*         ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"📝 `{info.get('title', 'Social Media File')}`\n"
+                f"⏱ Duration: `{duration_str}`\n\n"
+                f"👇 _Choose action:_",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -3321,10 +3352,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         await message.reply_text(
-            f"📥 *DIRECT LINK / لینک مستقیم*\n"
-            f"{DIVIDER}\n"
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃  📥  *DIRECT LINK*        ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
             f"🔗 `{url}`\n\n"
-            f"👇 *Choose action:* / یکی از گزینه‌ها را انتخاب کنید:",
+            f"👇 _Choose action:_",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -3608,11 +3640,12 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard.append([InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"conv:{file_uuid}:cancel")])
 
     await message.reply_text(
-        f"🔄 *FILE CONVERTER / مبدل فرمت فایل* 🔄\n"
-        f"{DIVIDER}\n"
-        f"📁 *File Name:* `{filename}`\n"
-        f"📦 *Type:* `{file_type.upper()}`\n\n"
-        f"👇 *Select action:* / گزینه مورد نظر را انتخاب کنید:",
+        f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+        f"┃  🔄  *FILE CONVERTER*     ┃\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"📁 `{filename}`\n"
+        f"📦 Type: `{file_type.upper()}`\n\n"
+        f"👇 _Select action:_",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -4219,10 +4252,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
             ]
             await query.edit_message_text(
-                "🔄 *ADVANCED MEDIA & DOCUMENT ENGINE* 🔄\n"
-                f"{DIVIDER}\n"
-                "Select a dedicated tool below to start, or simply upload any file directly to the bot!\n\n"
-                "👇 *Choose a tool / انتخاب ابزار:*",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  🔄  *MEDIA ENGINE*       ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"Select a tool or upload any file directly.\n\n"
+                f"👇 _Choose a tool:_",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -4419,9 +4453,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await query.edit_message_text(
-            f"⚙️ *Select Video Resolution / انتخاب کیفیت ویدیو* ⚙️\n\n"
-            f"🎥 *Media:* `{cached['title']}`\n\n"
-            f"👇 *Choose your resolution:*",
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃  ⚙️  *RESOLUTION*         ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            f"🎥 `{cached['title']}`\n\n"
+            f"👇 _Choose your resolution:_",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -4480,7 +4516,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         duration_str = f"{format_seconds(cached['duration'])}" if cached.get('duration') else "unknown"
         await query.edit_message_text(
-            f"🎥 *Media:* `{cached['title']}`\n⏱ *Duration:* `{duration_str}`\n\n*Choose download format:*",
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃  📥  *DOWNLOAD OPTIONS*   ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            f"🎥 `{cached['title']}`\n"
+            f"⏱ `{duration_str}`\n\n"
+            f"👇 _Choose format:_",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -4524,9 +4565,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'url_id': url_id
             }
             await query.edit_message_text(
-                "✂️ *Trimming Video / برش ویدیو*\n\n"
-                "Please reply to this message with the start and end times in `MM:SS` or `HH:MM:SS` format.\n"
-                "Example: `01:30 - 02:15` or `00:00 - 00:45`.",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  ✂️  *TRIM VIDEO*         ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"Reply with start and end times:\n"
+                f"`MM:SS - MM:SS` or `HH:MM:SS - HH:MM:SS`\n\n"
+                f"📌 Example: `01:30 - 02:15`",
                 parse_mode="Markdown"
             )
             return
@@ -4602,9 +4646,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'video_file_uuid': file_uuid
             }
             await query.edit_message_text(
-                "💬 *Add Subtitle / چسباندن زیرنویس* 💬\n\n"
-                "Please send/upload the `.srt` subtitle file now.\n"
-                "I will burn it into the video and send the final version back to you.",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  💬  *ADD SUBTITLE*       ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"Send the `.srt` subtitle file now.\n"
+                f"I will burn it into the video.",
                 parse_mode="Markdown"
             )
             return
@@ -4615,10 +4661,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'audio_file_uuid': file_uuid
             }
             await query.edit_message_text(
-                "🏷 *Music Tag Editor / ویرایشگر تگ* 🏷\n\n"
-                "Please send the new metadata tags in the following format:\n"
-                "`Artist - Title - Album`\n\n"
-                "Example: `Coldplay - Yellow - Parachutes`",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  🏷  *EDIT TAGS*          ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"Send tags in this format:\n"
+                f"`Artist - Title - Album`\n\n"
+                f"📌 Example: `Coldplay - Yellow - Parachutes`",
                 parse_mode="Markdown"
             )
             return
@@ -4638,8 +4686,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
             ]
             await query.edit_message_text(
-                "🎭 *Voice & Audio Effects / افکت‌های صدا* 🎭\n\n"
-                "Choose an effect to apply to your audio file:",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  🎭  *VOICE EFFECTS*      ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"Choose an effect for your audio:",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
@@ -4676,8 +4726,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'file_uuid': file_uuid
             }
             await query.edit_message_text(
-                "🔒 *Protect PDF / رمزگذاری پی‌دی‌اف* 🔒\n\n"
-                "Please reply with the password you want to set for this PDF file:",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  🔒  *PROTECT PDF*        ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"Reply with the password to set:",
                 parse_mode="Markdown"
             )
             return
@@ -4688,8 +4740,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'file_uuid': file_uuid
             }
             await query.edit_message_text(
-                "🔓 *Unlock PDF / رمزگشایی پی‌دی‌اف* 🔓\n\n"
-                "Please reply with the password of this PDF file to remove it:",
+                f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                f"┃  🔓  *UNLOCK PDF*         ┃\n"
+                f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"Reply with the PDF password:",
                 parse_mode="Markdown"
             )
             return
@@ -4888,7 +4942,7 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
 
     pos = download_queue.qsize() + 1
     if pos > 1:
-        await status_msg.edit_text(f"⏳ *Queue Position:* #{pos}\nOther tasks are currently executing. Please wait...")
+        await status_msg.edit_text(f"⏳ *Queue Position:* #{pos}\nPlease wait for other tasks to complete...")
     await download_queue.put(download_task)
 
 async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
@@ -5100,24 +5154,28 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size = os.path.getsize(COOKIES_FILE)
         mod_time = time.ctime(os.path.getmtime(COOKIES_FILE))
         await update.message.reply_text(
-            f"🍪 *Cookies Status*\n\n"
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃  🍪  *COOKIES STATUS*     ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
             f"✅ `cookies.txt` is *active*\n"
             f"📦 Size: `{size} bytes`\n"
-            f"🕐 Last updated: `{mod_time}`\n\n"
-            f"To update: send a new `cookies.txt` file to the bot.",
+            f"🕐 Updated: `{mod_time}`\n\n"
+            f"_To update: send a new `cookies.txt` file._",
             parse_mode="Markdown"
         )
     else:
         await update.message.reply_text(
-            f"🍪 *Cookies Setup*\n\n"
-            f"❌ No `cookies.txt` found — bot detection is *active* on YouTube/PornHub.\n\n"
-            f"*To fix YouTube/PornHub bot detection:*\n"
-            f"1️⃣ Install browser extension: *Get cookies.txt LOCALLY*\n"
-            f"   (Chrome: https://chrome.google.com/webstore)\n"
+            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃  🍪  *COOKIES SETUP*      ┃\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            f"❌ No `cookies.txt` found.\n"
+            f"Bot detection is *active* on YouTube.\n\n"
+            f"*To fix:*\n"
+            f"1️⃣ Install *Get cookies.txt LOCALLY*\n"
             f"2️⃣ Visit youtube.com while *logged in*\n"
             f"3️⃣ Export cookies as `cookies.txt`\n"
-            f"4️⃣ Send the `cookies.txt` file *directly to this bot*\n\n"
-            f"📁 File will be saved as: `{COOKIES_FILE}`",
+            f"4️⃣ Send the file *directly to this bot*\n\n"
+            f"📁 Saved to: `{COOKIES_FILE}`",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
