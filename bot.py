@@ -635,12 +635,12 @@ async def search_youtube_invidious(query: str) -> str | None:
 async def fetch_spotify_metadata(url):
     """Fetches track metadata from public Spotify page with robust fallbacks."""
     import re
-    
+
     track_id = None
     m = re.search(r'/track/([a-zA-Z0-9]+)', url)
     if m:
         track_id = m.group(1)
-    
+
     if not track_id:
         parsed = urlparse(url)
         path_parts = parsed.path.strip("/").split("/")
@@ -648,7 +648,7 @@ async def fetch_spotify_metadata(url):
             idx = path_parts.index("track")
             if idx + 1 < len(path_parts):
                 track_id = path_parts[idx + 1].split("?")[0]
-    
+
     if not track_id:
         return None
 
@@ -702,7 +702,42 @@ async def fetch_spotify_metadata(url):
     except Exception as e:
         logger.warning(f"oEmbed failed: {e}")
 
-    # Method 3: og tags from embed page
+    # Method 3: curl_cffi browser impersonation (bypasses datacenter IP blocks)
+    if _HAS_IMPERSONATE:
+        try:
+            from curl_cffi import requests as cffi_requests
+            proxy_url = get_proxy_url()
+            proxies = {"https": proxy_url, "http": proxy_url} if proxy_url else None
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            track_url = f"https://open.spotify.com/track/{track_id}"
+            resp = cffi_requests.get(track_url, impersonate="chrome", headers=headers, proxies=proxies, timeout=15)
+            if resp.status_code == 200:
+                html = resp.text
+                title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+                title = unquote(title_match.group(1)) if title_match else None
+                image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+                image = image_match.group(1) if image_match else None
+                desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+                desc = unquote(desc_match.group(1)) if desc_match else ""
+                artist = "Unknown Artist"
+                if " · " in desc:
+                    parts = desc.split(" · ")
+                    if parts[0].startswith("Song by "):
+                        artist = parts[0].replace("Song by ", "")
+                    elif len(parts) > 1 and "by " in parts[0]:
+                        artist = parts[0].split("by ")[-1]
+                elif "by " in desc:
+                    artist = desc.split("by ")[-1]
+                if title:
+                    logger.info("Spotify metadata fetched via curl_cffi impersonation")
+                    return {"title": title, "artist": artist, "thumbnail": image}
+        except Exception as e:
+            logger.warning(f"curl_cffi Spotify fetch failed: {e}")
+
+    # Method 4: og tags from embed page
     try:
         proxy_url = get_proxy_url()
         embed_url = f"https://open.spotify.com/embed/track/{track_id}"
@@ -731,34 +766,6 @@ async def fetch_spotify_metadata(url):
     except Exception as e:
         logger.warning(f"Embed page failed: {e}")
 
-    # Method 4: og tags from main page
-    try:
-        proxy_url = get_proxy_url()
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
-                    title = unquote(title_match.group(1)) if title_match else None
-                    image_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
-                    image = image_match.group(1) if image_match else None
-                    desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
-                    desc = unquote(desc_match.group(1)) if desc_match else ""
-                    artist = "Unknown Artist"
-                    if " · " in desc:
-                        parts = desc.split(" · ")
-                        if parts[0].startswith("Song by "):
-                            artist = parts[0].replace("Song by ", "")
-                        elif len(parts) > 1 and "by " in parts[0]:
-                            artist = parts[0].split("by ")[-1]
-                    elif "by " in desc:
-                        artist = desc.split("by ")[-1]
-                    if title:
-                        logger.info("Spotify metadata fetched via main page")
-                        return {"title": title, "artist": artist, "thumbnail": image}
-    except Exception as e:
-        logger.warning(f"Main page failed: {e}")
-        
     return None
 
 async def upload_to_techpulse(filepath, custom_filename=None):
