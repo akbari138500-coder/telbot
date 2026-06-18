@@ -2896,22 +2896,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     elif text == "🤖 AI Chat":
-        keyboard = [
-            [
-                InlineKeyboardButton("✨ Gemini", callback_data="ai_engine:gemini"),
-                InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
+        current_engine = USER_STATES.get(user_id, {}).get("ai_engine")
+        if current_engine:
+            engine_names = {"gemini": "✨ Gemini", "aerolink": "🚀 Aerolink AI"}
+            engine_name = engine_names.get(current_engine, "AI")
+            keyboard = [
+                [InlineKeyboardButton(f"✅ Currently: {engine_name}", callback_data="ainoop")],
+                [InlineKeyboardButton("🛑 Stop AI", callback_data="ai_stop")]
             ]
-        ]
-        await message.reply_text(
-            "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-            "┃   🤖  *AI ASSISTANT*      ┃\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-            "Choose your AI engine below.\n"
-            "موتور هوش مصنوعی خود را انتخاب کنید:\n\n"
-            f"{THIN_DIVIDER}",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+            await message.reply_text(
+                "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                "┃   🤖  *AI ASSISTANT*      ┃\n"
+                "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                f"AI is *active* with: *{engine_name}*\n"
+                f"هوش مصنوعی فعال است — هر پیام متنی پاسخ داده می‌شود\n\n"
+                f"🛑 *برای غیرفعال کردن، دکمه زیر را بزنید*\n"
+                f"{THIN_DIVIDER}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+        else:
+            keyboard = [
+                [
+                    InlineKeyboardButton("✨ Gemini", callback_data="ai_engine:gemini"),
+                    InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
+                ]
+            ]
+            await message.reply_text(
+                "┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+                "┃   🤖  *AI ASSISTANT*      ┃\n"
+                "┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                "Choose your AI engine below.\n"
+                "موتور هوش مصنوعی خود را انتخاب کنید:\n\n"
+                f"{THIN_DIVIDER}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
         return
     elif text == "📊 Stats":
         await stats_command(update, context)
@@ -3648,11 +3668,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         engine_name = engine_names.get(engine, engine)
         
+        keyboard = [[InlineKeyboardButton("🛑 Stop AI", callback_data="ai_stop")]]
         await query.message.edit_text(
             f"✅ AI Engine set to: *{engine_name}*\n\n"
-            f"Now send me any text message to chat! / برای شروع مکالمه یک متن ارسال کنید:",
+            f"Now send me any text message to chat! / برای شروع مکالمه یک متن ارسال کنید:\n\n"
+            f"🛑 *برای غیرفعال کردن:* دکمه زیر را بزنید یا دوباره روی AI Chat کلیک کنید",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
+        return
+
+    if action == "ai_stop":
+        if user_id in USER_STATES:
+            USER_STATES[user_id].pop('ai_engine', None)
+        keyboard = [
+            [
+                InlineKeyboardButton("✨ Gemini", callback_data="ai_engine:gemini"),
+                InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
+            ]
+        ]
+        await query.message.edit_text(
+            "🛑 *AI Chat stopped / هوش مصنوعی غیرفعال شد*\n\n"
+            "Pick a new engine or use the bot normally.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return
+
+    if action == "ainoop":
+        await query.answer("AI is already active!", show_alert=False)
         return
 
     if action == "tp_upload":
