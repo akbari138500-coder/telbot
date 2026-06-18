@@ -1238,7 +1238,7 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "ffmpeg_location": FFMPEG_EXE,
         "extractor_args": {"youtube": {"skip": ["translated_subs"], "player_client": ["mediaconnect", "web_creator", "web"]}},
         "socket_timeout": 30,
-        "js_runtimes": ["node"],
+        "js_runtimes": {"node": {}},
         **get_ydl_cookie_opts(),
         **site_opts,
     }
@@ -1884,7 +1884,7 @@ def run_youtube_search(query, page=1):
         'noplaylist': True,
         'extract_flat': True,
         'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
-        'js_runtimes': ['node'],
+        'js_runtimes': {'node': {}},
         **get_ydl_cookie_opts(),
         **get_site_specific_opts(search_url),
     }
@@ -3023,44 +3023,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         urls.append("https://" + text)
 
     if not urls:
-        engine = USER_STATES.get(user_id, {}).get("ai_engine", "gemini")
+        engine = USER_STATES.get(user_id, {}).get("ai_engine")
         
-        engine_names = {
-            "gemini": "Gemini",
-            "aerolink": "Aerolink AI"
-        }
-        engine_name = engine_names.get(engine, "AI")
-        
-        status_msg = await message.reply_text(f"🤖 *Thinking ({engine_name})... / در حال پردازش*", parse_mode="Markdown")
-        try:
-            await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-        except Exception:
-            pass
-        
-        # Route to the correct AI engine
-        if engine == "gemini":
-            response = await query_gemini(text)
-        elif engine == "aerolink":
-            response = await query_aerolink(text)
-        else:
-            response = await query_gemini(text)
-        
-        # Format Markdown to be more compatible with Telegram's legacy Markdown
-        formatted_text = response
-        formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text) # Convert **bold** to *bold*
-        formatted_text = re.sub(r'^###\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
-        formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
-        formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
-        
-        final_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  *{engine_name}*          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{formatted_text}"
-        
-        try:
-            await status_msg.edit_text(final_msg, parse_mode="Markdown")
-        except Exception as e:
-            # Fallback to plain text if Telegram markdown parser fails (due to unclosed tags)
-            plain_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  {engine_name}          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{response}"
-            await status_msg.edit_text(plain_msg)
-        return
+        if engine:
+            engine_names = {
+                "gemini": "Gemini",
+                "aerolink": "Aerolink AI"
+            }
+            engine_name = engine_names.get(engine, "AI")
+            
+            status_msg = await message.reply_text(f"🤖 *Thinking ({engine_name})... / در حال پردازش*", parse_mode="Markdown")
+            try:
+                await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+            except Exception:
+                pass
+            
+            # Route to the correct AI engine
+            if engine == "gemini":
+                response = await query_gemini(text)
+            elif engine == "aerolink":
+                response = await query_aerolink(text)
+            else:
+                response = await query_gemini(text)
+            
+            # Format Markdown to be more compatible with Telegram's legacy Markdown
+            formatted_text = response
+            formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text) # Convert **bold** to *bold*
+            formatted_text = re.sub(r'^###\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+            formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+            formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+            
+            final_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  *{engine_name}*          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{formatted_text}"
+            
+            try:
+                await status_msg.edit_text(final_msg, parse_mode="Markdown")
+            except Exception as e:
+                # Fallback to plain text if Telegram markdown parser fails (due to unclosed tags)
+                plain_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  {engine_name}          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{response}"
+                await status_msg.edit_text(plain_msg)
+            return
 
     raw_url = urls[0]
     if not raw_url.startswith(("http://", "https://")):
@@ -3212,7 +3213,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'no_warnings': True,
                     'socket_timeout': 15,
                     'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
-                    'js_runtimes': ['node'],
+                    'js_runtimes': {'node': {}},
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
@@ -5042,7 +5043,7 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
                     'no_warnings': True,
                     'extract_flat': True,
                     'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
-                    'js_runtimes': ['node'],
+                    'js_runtimes': {'node': {}},
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
