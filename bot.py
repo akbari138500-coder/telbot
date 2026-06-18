@@ -2644,10 +2644,9 @@ async def query_gemini(prompt: str) -> str:
     
     # Try multiple model names in order of preference
     models = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
         "gemini-2.0-flash",
-        "gemini-pro",
     ]
     
     proxy_url = get_proxy_url()
@@ -2677,70 +2676,52 @@ async def query_gemini(prompt: str) -> str:
     
     return "⚠️ AI Error: All Gemini models failed. Check your API key."
 
-async def query_agentrouter(prompt: str, model_override: str = None) -> str:
+async def query_aerolink(prompt: str) -> str:
     import aiohttp
     import os
-    api_key = (os.getenv("OPENROUTER_API_KEY") or os.getenv("AGENTROUTER_API_KEY") or "").strip()
+    api_key = os.getenv("AEROLINK_API_KEY", "aero_live_Th0c_y4qggPiffUZK0Gt0NyNUFCVnKETnA15UleEN4Q")
     if not api_key:
-        return "⚠️ AI Error: OPENROUTER_API_KEY or AGENTROUTER_API_KEY is not set in .env file."
+        return "⚠️ AI Error: AEROLINK_API_KEY is not set."
     
-    # Map engine names to OpenRouter model IDs
-    engine_model_map = {
-        "claude": "anthropic/claude-3.5-sonnet",
-        "gpt4o": "openai/gpt-4o-mini",
-        "llama": "meta-llama/llama-3.1-8b-instruct",
-        "opus": "anthropic/claude-3-opus",
-    }
-    
-    # If specific model requested, use it first
-    models_to_try = []
-    if model_override and model_override in engine_model_map:
-        models_to_try.append(engine_model_map[model_override])
-    
-    # Add fallback models
-    fallback_models = [
-        "anthropic/claude-3.5-sonnet",
-        "openai/gpt-4o-mini",
-        "google/gemini-2.0-flash-001",
-        "meta-llama/llama-3.1-8b-instruct",
+    models = [
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
     ]
-    for m in fallback_models:
-        if m not in models_to_try:
-            models_to_try.append(m)
     
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://techpulse.com",
-        "X-Title": "TechPulse Bot"
-    }
     proxy_url = get_proxy_url()
+    url = "https://capi.aerolink.lat/v1/messages"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json"
+    }
     
-    for model in models_to_try:
+    for model in models:
         payload = {
             "model": model,
+            "max_tokens": 4096,
             "messages": [{"role": "user", "content": prompt}]
         }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, headers=headers, proxy=proxy_url,
-                                       timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                       timeout=aiohttp.ClientTimeout(total=60)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        choices = data.get("choices", [])
-                        if choices:
-                            content = choices[0].get("message", {}).get("content", "")
-                            if content:
-                                logger.info(f"OpenRouter success with model {model}")
-                                return content
+                        content_blocks = data.get("content", [])
+                        if content_blocks:
+                            text = content_blocks[0].get("text", "")
+                            if text:
+                                logger.info(f"Aerolink success with model {model}")
+                                return text
                     else:
                         error_text = await resp.text()
-                        logger.warning(f"OpenRouter model {model} failed: {resp.status} - {error_text[:100]}")
+                        logger.warning(f"Aerolink model {model} failed: {resp.status} - {error_text[:100]}")
         except Exception as e:
-            logger.warning(f"OpenRouter model {model} exception: {e}")
+            logger.warning(f"Aerolink model {model} exception: {e}")
     
-    return "⚠️ AI Error: All AI models failed. Check your API key."
+    return "⚠️ AI Error: All Aerolink models failed."
 
 # =====================================================================
 # Main Message Handler (Inputs & Routing)
@@ -2918,11 +2899,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton("✨ Gemini", callback_data="ai_engine:gemini"),
-                InlineKeyboardButton("🧠 Claude 3.5", callback_data="ai_engine:claude")
-            ],
-            [
-                InlineKeyboardButton("🤖 GPT-4o", callback_data="ai_engine:gpt4o"),
-                InlineKeyboardButton("🦙 Llama 3.1", callback_data="ai_engine:llama")
+                InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
             ]
         ]
         await message.reply_text(
@@ -3027,9 +3004,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         engine_names = {
             "gemini": "Gemini",
-            "claude": "Claude 3.5",
-            "gpt4o": "GPT-4o",
-            "llama": "Llama 3.1"
+            "aerolink": "Aerolink AI"
         }
         engine_name = engine_names.get(engine, "AI")
         
@@ -3042,9 +3017,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Route to the correct AI engine
         if engine == "gemini":
             response = await query_gemini(text)
-        elif engine in ("claude", "gpt4o", "llama"):
-            # All non-Gemini engines use OpenRouter
-            response = await query_agentrouter(text, model_override=engine)
+        elif engine == "aerolink":
+            response = await query_aerolink(text)
         else:
             response = await query_gemini(text)
         
@@ -3670,9 +3644,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         engine_names = {
             "gemini": "✨ Google Gemini",
-            "claude": "🧠 Claude 3.5 Sonnet",
-            "gpt4o": "🤖 GPT-4o",
-            "llama": "🦙 Llama 3.1"
+            "aerolink": "🚀 Aerolink AI"
         }
         engine_name = engine_names.get(engine, engine)
         
