@@ -68,13 +68,11 @@ if proxy_url:
     os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
     os.environ['no_proxy'] = 'localhost,127.0.0.1'
 else:
-    # Bypass Windows registry proxy settings if not explicitly defined in the environment
-    if sys.platform.startswith('win'):
-        for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
-            if var not in os.environ:
-                os.environ[var] = ''
-        os.environ['NO_PROXY'] = '*'
-        os.environ['no_proxy'] = '*'
+    # No proxy detected — clear any stale proxy env vars that would break direct connections
+    for var in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+        os.environ.pop(var, None)
+    os.environ['NO_PROXY'] = '*'
+    os.environ['no_proxy'] = '*'
 
 # Check if curl_cffi is installed to support browser impersonation targets
 try:
