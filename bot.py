@@ -374,7 +374,8 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
     Uses --impersonate chrome for sites that require browser impersonation.
     """
     try:
-        cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--dump-json", "--no-download"]
+        cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--dump-json", "--no-download",
+               "--js-runtimes", "node"]
         if is_impersonate_site(url) and _HAS_IMPERSONATE:
             cmd += ["--impersonate", "chrome"]
         if os.path.exists(COOKIES_FILE):
@@ -382,7 +383,7 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
         proxy_url = get_proxy_url()
         if proxy_url:
             cmd += ["--proxy", proxy_url]
-        cmd += ["--extractor-args", "youtube:player_client=android,web"]
+        cmd += ["--extractor-args", "youtube:player_client=mediaconnect,web_creator,web"]
         cmd += ["--socket-timeout", "15"]
         cmd.append(url)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
@@ -1235,8 +1236,9 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "subtitleslangs": ["en", "fa"],
         "http_headers": site_opts.pop("http_headers", base_headers),
         "ffmpeg_location": FFMPEG_EXE,
-        "extractor_args": {"youtube": {"skip": ["translated_subs"], "player_client": ["android", "web"]}},
+        "extractor_args": {"youtube": {"skip": ["translated_subs"], "player_client": ["mediaconnect", "web_creator", "web"]}},
         "socket_timeout": 30,
+        "js_runtimes": ["node"],
         **get_ydl_cookie_opts(),
         **site_opts,
     }
@@ -1881,7 +1883,8 @@ def run_youtube_search(query, page=1):
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': True,
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+        'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
+        'js_runtimes': ['node'],
         **get_ydl_cookie_opts(),
         **get_site_specific_opts(search_url),
     }
@@ -3190,7 +3193,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'quiet': True,
                     'no_warnings': True,
                     'socket_timeout': 15,
-                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+                    'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
+                    'js_runtimes': ['node'],
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
@@ -4977,7 +4981,8 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': True,
-                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+                    'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
+                    'js_runtimes': ['node'],
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
                 }
