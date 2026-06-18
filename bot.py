@@ -4998,6 +4998,7 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
             logger.error(f"Task failed: {e}", exc_info=True)
             err_msg = str(e)
             try:
+                logger.error(f"Download error detail: {err_msg[:500]}")
                 if (isinstance(e, AssertionError) or "assertion" in err_msg.lower()) and "cookie" in err_msg.lower():
                     await status_msg.edit_text(
                         f"❌ *Cookie Format Error / خطای فرمت کوکی*\n\n"
@@ -5007,12 +5008,18 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                         f"ensuring it's in Netscape format, and send it to the bot again.",
                         parse_mode="Markdown"
                     )
-                elif any(x in err_msg.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
+                elif any(x in err_msg.lower() for x in ["confirm you", "not a bot", "forbidden", "403", "429"]):
                     await status_msg.edit_text(
                         f"❌ *Download Failed (YouTube Bot Detection / Block)*\n\n"
-                        f"YouTube has blocked this request. Please export your YouTube cookies as a `cookies.txt` file "
-                        f"using a browser extension and send the file directly to this bot to bypass it.\n\n"
+                        f"Error: `{err_msg[:200]}`\n\n"
                         f"Run the /cookies command for step-by-step instructions.",
+                        parse_mode="Markdown"
+                    )
+                elif "format is not available" in err_msg.lower():
+                    await status_msg.edit_text(
+                        f"❌ *Format not available*\n\n"
+                        f"Error: `{err_msg[:200]}`\n\n"
+                        f"Try a different resolution or format.",
                         parse_mode="Markdown"
                     )
                 else:
