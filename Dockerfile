@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     fontconfig \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone and install standard Persian/Farsi fonts (IRFonts, Vazirmatn, and traditional B-Nazanin/B-Zar)

@@ -322,9 +322,28 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
     return None
 
 
-# Sites that require browser impersonation (chrome) to bypass bot detection
-# These were blocking with yt-dlp because their extractor needs --impersonate
-# This is the REAL fix (not IP blocking) — confirmed by yt-dlp issue trackers
+# Working YouTube player clients (yt-dlp 2026.07+).
+# mediaconnect is unsupported; web / web_creator require sign-in cookies.
+# android_vr is the default jsless client and works without PO tokens.
+YOUTUBE_PLAYER_CLIENTS = ["android_vr", "web_embedded", "mweb"]
+
+
+def get_youtube_extractor_args(extra: dict | None = None) -> dict:
+    """Central YouTube extractor_args used by every yt-dlp call site."""
+    args = {"player_client": list(YOUTUBE_PLAYER_CLIENTS)}
+    if extra:
+        args.update(extra)
+    return {"youtube": args}
+
+
+def is_youtube_url(url: str) -> bool:
+    """True for youtube.com / youtu.be / ytsearch URLs."""
+    return bool(re.search(r'(?:youtube\.com|youtu\.be|ytsearch)', url or "", re.IGNORECASE))
+
+
+# Adult sites that need --impersonate chrome (and optionally Cobalt fallback).
+# YouTube is intentionally NOT here: public Cobalt APIs require JWT now, and
+# android_vr player client handles YouTube without browser impersonation.
 _IMPERSONATE_SITES = [
     r'pornhub\.com',
     r'xvideos\.com',
@@ -334,9 +353,6 @@ _IMPERSONATE_SITES = [
     r'tube8\.com',
     r'spankbang\.com',
     r'xnxx\.com',
-    r'youtube\.com',
-    r'youtu\.be',
-    r'ytsearch',
 ]
 
 def is_impersonate_site(url: str) -> bool:
@@ -383,10 +399,10 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
         proxy_url = get_proxy_url()
         if proxy_url:
             cmd += ["--proxy", proxy_url]
-        cmd += ["--extractor-args", "youtube:player_client=mediaconnect,web_creator,web"]
-        cmd += ["--socket-timeout", "15"]
+        cmd += ["--extractor-args", f"youtube:player_client={','.join(YOUTUBE_PLAYER_CLIENTS)}"]
+        cmd += ["--socket-timeout", "30"]
         cmd.append(url)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
         if result.returncode != 0:
             return None
         info = json.loads(result.stdout)
@@ -673,32 +689,40 @@ async def fetch_spotify_metadata(url):
     except Exception as e:
         logger.warning(f"spotipy failed: {e}")
 
-    # Method 2: oEmbed API (no auth needed)
+    # Method 2: oEmbed API (no auth needed) — title only; artist often missing
+    oembed_title = None
+    oembed_thumb = None
     try:
         import urllib.parse as _up
-        oembed_url = f"https://open.spotify.com/oembed?url={_up.quote(url)}"
+        # Prefer clean track URL for oEmbed (spotify.link short URLs can fail)
+        oembed_target = f"https://open.spotify.com/track/{track_id}" if track_id else url
+        oembed_url = f"https://open.spotify.com/oembed?url={_up.quote(oembed_target)}"
         proxy_url = get_proxy_url()
         async with aiohttp.ClientSession() as session:
             async with session.get(oembed_url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    title = data.get("title", "")
+                    title = (data.get("title") or "").strip()
                     if title:
-                        logger.info("Spotify metadata fetched via oEmbed")
+                        logger.info("Spotify oEmbed title OK, refining artist via other methods...")
                         artist = "Unknown Artist"
                         if " - " in title:
                             parts = title.split(" - ", 1)
-                            artist = parts[0]
-                            title = parts[1]
+                            artist = parts[0].strip()
+                            title = parts[1].strip()
                         elif " by " in title:
                             parts = title.rsplit(" by ", 1)
-                            title = parts[0]
-                            artist = parts[1]
-                        return {
-                            "title": title,
-                            "artist": artist,
-                            "thumbnail": data.get("thumbnail_url")
-                        }
+                            title = parts[0].strip()
+                            artist = parts[1].strip()
+                        oembed_title = title
+                        oembed_thumb = data.get("thumbnail_url")
+                        # If we already have a real artist, return immediately
+                        if artist and artist.lower() not in ("unknown artist", "unknown"):
+                            return {
+                                "title": title,
+                                "artist": artist,
+                                "thumbnail": oembed_thumb,
+                            }
     except Exception as e:
         logger.warning(f"oEmbed failed: {e}")
 
@@ -713,7 +737,7 @@ async def fetch_spotify_metadata(url):
                 "Accept-Language": "en-US,en;q=0.9",
             }
             track_url = f"https://open.spotify.com/track/{track_id}"
-            resp = cffi_requests.get(track_url, impersonate="chrome", headers=headers, proxies=proxies, timeout=15)
+            resp = cffi_requests.get(track_url, impersonate="chrome", headers=headers, proxies=proxies, timeout=5)
             if resp.status_code == 200:
                 html = resp.text
                 title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
@@ -733,7 +757,7 @@ async def fetch_spotify_metadata(url):
                     artist = desc.split("by ")[-1]
                 if title:
                     logger.info("Spotify metadata fetched via curl_cffi impersonation")
-                    return {"title": title, "artist": artist, "thumbnail": image}
+                    return {"title": title, "artist": artist, "thumbnail": image or oembed_thumb}
         except Exception as e:
             logger.warning(f"curl_cffi Spotify fetch failed: {e}")
 
@@ -742,7 +766,7 @@ async def fetch_spotify_metadata(url):
         proxy_url = get_proxy_url()
         embed_url = f"https://open.spotify.com/embed/track/{track_id}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(embed_url, timeout=aiohttp.ClientTimeout(total=10), proxy=proxy_url) as resp:
+            async with session.get(embed_url, timeout=aiohttp.ClientTimeout(total=4), proxy=proxy_url) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
@@ -762,9 +786,14 @@ async def fetch_spotify_metadata(url):
                         artist = desc.split("by ")[-1]
                     if title:
                         logger.info("Spotify metadata fetched via embed page")
-                        return {"title": title, "artist": artist, "thumbnail": image}
+                        return {"title": title, "artist": artist, "thumbnail": image or oembed_thumb}
     except Exception as e:
         logger.warning(f"Embed page failed: {e}")
+
+    # Last resort: oEmbed title alone is enough to search YouTube for the track
+    if oembed_title:
+        logger.info("Spotify metadata: using oEmbed title only (artist unknown)")
+        return {"title": oembed_title, "artist": "Unknown Artist", "thumbnail": oembed_thumb}
 
     return None
 
@@ -975,6 +1004,8 @@ async def download_thumbnail(url, dest_dir):
 
 def yt_dlp_hook(d, tracker):
     """Processes yt-dlp download status hook and pushes formatted updates."""
+    if not tracker:
+        return
     if d["status"] == "downloading":
         filename = os.path.basename(d.get("filename", "video"))
         total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
@@ -1228,15 +1259,17 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": 16,
         "fragment_retries": 10,
         "retries": 10,
+        "nocheckcertificate": True,
+        "geo_bypass": True,
         "writesubtitles": True,
         "allsubtitles": False,
         "subtitleslangs": ["en", "fa"],
         "http_headers": site_opts.pop("http_headers", base_headers),
         "ffmpeg_location": FFMPEG_EXE,
-        "extractor_args": {"youtube": {"skip": ["translated_subs"], "player_client": ["mediaconnect", "web_creator", "web"]}},
+        "extractor_args": get_youtube_extractor_args({"skip": ["translated_subs"]}),
         "socket_timeout": 30,
         "js_runtimes": {"node": {}},
         **get_ydl_cookie_opts(),
@@ -1883,7 +1916,7 @@ def run_youtube_search(query, page=1):
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': True,
-        'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
+        'extractor_args': get_youtube_extractor_args(),
         'js_runtimes': {'node': {}},
         **get_ydl_cookie_opts(),
         **get_site_specific_opts(search_url),
@@ -2638,7 +2671,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def query_gemini(prompt: str) -> str:
+async def query_gemini(prompt: str, file_data: dict | None = None) -> str:
     import aiohttp
     import os
     api_key = os.getenv("GEMINI_API_KEY")
@@ -2647,6 +2680,9 @@ async def query_gemini(prompt: str) -> str:
     
     # Try multiple model names in order of preference
     models = [
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.1-flash",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
         "gemini-2.0-flash",
@@ -2654,11 +2690,26 @@ async def query_gemini(prompt: str) -> str:
     
     proxy_url = get_proxy_url()
     
+    parts = []
+    if prompt:
+        parts.append({"text": prompt})
+    if file_data:
+        parts.append({
+            "inlineData": {
+                "mimeType": file_data["mime_type"],
+                "data": file_data["data"]
+            }
+        })
+        
+    if not parts:
+        return "⚠️ AI Error: No text or file provided."
+        
+    payload = {
+        "contents": [{"parts": parts}]
+    }
+    
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}]
-        }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, proxy=proxy_url, 
@@ -2679,7 +2730,7 @@ async def query_gemini(prompt: str) -> str:
     
     return "⚠️ AI Error: All Gemini models failed. Check your API key."
 
-async def query_aerolink(prompt: str) -> str:
+async def query_aerolink(prompt: str, file_data: dict | None = None) -> str:
     import aiohttp
     import os
     api_key = os.getenv("AEROLINK_API_KEY", "aero_live_Th0c_y4qggPiffUZK0Gt0NyNUFCVnKETnA15UleEN4Q")
@@ -2687,24 +2738,56 @@ async def query_aerolink(prompt: str) -> str:
         return "⚠️ AI Error: AEROLINK_API_KEY is not set."
     
     models = [
+        "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-sonnet-4-6",
         "claude-haiku-4-5-20251001",
     ]
     
     proxy_url = get_proxy_url()
-    url = "https://capi.aerolink.lat/v1/messages"
+    url = "https://conduit.ozdoev.net/v1/messages"
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json"
     }
     
+    content = []
+    if file_data:
+        mime = file_data["mime_type"]
+        if mime.startswith("image/"):
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": file_data["data"]
+                }
+            })
+        elif mime == "application/pdf":
+            content.append({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": file_data["data"]
+                }
+            })
+            
+    if prompt:
+        content.append({
+            "type": "text",
+            "text": prompt
+        })
+        
+    if not content:
+        return "⚠️ AI Error: No text or file provided."
+        
     for model in models:
         payload = {
             "model": model,
             "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": [{"role": "user", "content": content}]
         }
         try:
             async with aiohttp.ClientSession() as session:
@@ -3091,28 +3174,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         track_artist = meta["artist"]
         track_thumb = meta["thumbnail"]
         
-        await status_msg.edit_text(f"🔍 *Searching for:* `{track_artist} - {track_title}` on YouTube...", parse_mode="Markdown")
+        # Build search query: skip placeholder artist so oEmbed-only results still match
+        artist_ok = track_artist and track_artist.lower() not in ("unknown artist", "unknown", "")
+        search_query = f"{track_artist} - {track_title}" if artist_ok else track_title
+        await status_msg.edit_text(f"🔍 *Searching for:* `{search_query}` on YouTube...", parse_mode="Markdown")
         
         # Search YouTube for the track using Invidious (fallback to yt-dlp)
         loop = asyncio.get_running_loop()
         try:
-            yt_url = await search_youtube_invidious(f"{track_artist} {track_title}")
+            yt_url = await search_youtube_invidious(search_query)
             
             if not yt_url:
                 logger.info("Invidious search failed. Falling back to yt-dlp search...")
                 def search_yt_track():
-                    for query_fmt in [
-                        f"ytsearch1:{track_artist} - {track_title}",
-                        f"ytsearch1:{track_artist} {track_title} official audio",
-                        f"ytsearch1:{track_title} {track_artist}",
-                    ]:
+                    queries = [
+                        f"ytsearch1:{search_query}",
+                        f"ytsearch1:{track_title} official audio",
+                        f"ytsearch1:{track_title} lyrics",
+                    ]
+                    if artist_ok:
+                        queries.insert(1, f"ytsearch1:{track_artist} {track_title} official audio")
+                        queries.append(f"ytsearch1:{track_title} {track_artist}")
+                    for query_fmt in queries:
                         ydl_opts = {
                             'quiet': True,
                             'no_warnings': True,
                             'noplaylist': True,
                             'extract_flat': True,
+                            'socket_timeout': 20,
+                            'extractor_args': get_youtube_extractor_args(),
+                            'js_runtimes': {'node': {}},
                             **get_ydl_cookie_opts(),
-                            **get_site_specific_opts(query_fmt),
                         }
                         proxy_url = get_proxy_url()
                         if proxy_url:
@@ -3212,7 +3304,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'quiet': True,
                     'no_warnings': True,
                     'socket_timeout': 15,
-                    'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
+                    'extractor_args': get_youtube_extractor_args(),
                     'js_runtimes': {'node': {}},
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
@@ -3561,6 +3653,73 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if not file_id:
         return
+
+    # Check if AI mode is active
+    engine = USER_STATES.get(user_id, {}).get("ai_engine")
+    if engine:
+        status_msg = await message.reply_text(f"🤖 *Processing file ({engine})... / در حال پردازش فایل*", parse_mode="Markdown")
+        try:
+            tg_file = await context.bot.get_file(file_id)
+            import tempfile, base64
+            with tempfile.TemporaryDirectory() as temp_dir:
+                filepath = os.path.join(temp_dir, filename)
+                await tg_file.download_to_drive(filepath)
+                with open(filepath, "rb") as f:
+                    file_bytes = f.read()
+                base64_data = base64.b64encode(file_bytes).decode("utf-8")
+                
+            # Mime type detection
+            mime_type = None
+            if message.photo:
+                mime_type = "image/jpeg"
+            elif message.document:
+                mime_type = message.document.mime_type
+            elif message.audio:
+                mime_type = message.audio.mime_type
+            elif message.voice:
+                mime_type = message.voice.mime_type
+            elif message.video:
+                mime_type = message.video.mime_type
+            
+            if not mime_type:
+                import mimetypes
+                mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                
+            file_data = {
+                "mime_type": mime_type,
+                "data": base64_data
+            }
+            
+            caption = message.caption or "توضیح دهید"
+            
+            if engine == "gemini":
+                response = await query_gemini(caption, file_data)
+            elif engine == "aerolink":
+                response = await query_aerolink(caption, file_data)
+            else:
+                response = await query_gemini(caption, file_data)
+                
+            # Format markdown
+            formatted_text = response
+            formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text)
+            formatted_text = re.sub(r'^###\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+            formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+            formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
+            
+            engine_names = {"gemini": "Gemini", "aerolink": "Aerolink AI"}
+            engine_name = engine_names.get(engine, "AI")
+            final_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  *{engine_name}*          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{formatted_text}"
+            
+            try:
+                await status_msg.edit_text(final_msg, parse_mode="Markdown")
+            except Exception:
+                plain_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  {engine_name}          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{response}"
+                await status_msg.edit_text(plain_msg)
+            return
+        except Exception as ex:
+            logger.error(f"AI file processing failed: {ex}")
+            await status_msg.edit_text(f"❌ *AI processing error:* `{str(ex)[:150]}`", parse_mode="Markdown")
+            return
 
     # Classify file type based on extension
     _, ext = os.path.splitext(filename.lower())
@@ -4932,8 +5091,9 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                     _et = end_time
 
                     filepath = None
-                    # 🚀 Try Cobalt Bypass first if it's an impersonate site (YouTube/PornHub/etc.) and no trim is requested
-                    if is_impersonate_site(url) and not _st and not _et:
+                    # Cobalt public APIs now require JWT — skip for YouTube (android_vr works).
+                    # Still try Cobalt first for adult sites that often 403 datacenter IPs.
+                    if is_impersonate_site(url) and not is_youtube_url(url) and not _st and not _et:
                         try:
                             await status_msg.edit_text("📥 *Bypassing restrictions (Cobalt)...*", parse_mode="Markdown")
                             filepath = await _cobalt_download(url, temp_dir, audio_only=(_fmt == "audio"))
@@ -4952,7 +5112,7 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                             logger.warning(f"Cobalt download failed, falling back to yt-dlp: {ce}")
 
                     if not filepath:
-                        # yt-dlp Video / Audio download fallback
+                        # yt-dlp Video / Audio download (primary path for YouTube + music)
                         await status_msg.edit_text("📥 *Downloading media (yt-dlp)... / در حال دانلود*", parse_mode="Markdown")
                         bot_obj = status_msg.get_bot()
                         tracker = ProgressTracker(context_bot_wrapper(status_msg), chat_id, status_msg.message_id, loop)
@@ -5049,7 +5209,7 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': True,
-                    'extractor_args': {'youtube': {'player_client': ['mediaconnect', 'web_creator', 'web']}},
+                    'extractor_args': get_youtube_extractor_args(),
                     'js_runtimes': {'node': {}},
                     **get_ydl_cookie_opts(),
                     **get_site_specific_opts(url),
