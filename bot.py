@@ -151,10 +151,20 @@ THIN_DIVIDER = "─────────────────────�
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt"))  # Path to cookies.txt for bot detection bypass
 
-# Initialize cookies.txt from environment variable (useful for ephemeral environments like Render)
+# Initialize cookies.txt from environment variable (supports both raw text and base64)
 cookies_content = os.getenv("YOUTUBE_COOKIES_CONTENT")
 if cookies_content:
     try:
+        import base64
+        try:
+            # Attempt to decode as base64 in case Render UI stripped newlines of raw text
+            decoded = base64.b64decode(cookies_content.strip()).decode("utf-8")
+            if "# Netscape" in decoded or "\t" in decoded:
+                cookies_content = decoded
+                logger.info("Successfully decoded cookies from base64 format")
+        except Exception:
+            pass
+
         with open(COOKIES_FILE, "w", encoding="utf-8") as f:
             f.write(cookies_content)
         logger.info(f"Initialized cookies file from YOUTUBE_COOKIES_CONTENT environment variable ({len(cookies_content)} bytes)")
