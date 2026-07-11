@@ -438,8 +438,11 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
                "--js-runtimes", "node"]
         if is_impersonate_site(url) and _HAS_IMPERSONATE:
             cmd += ["--impersonate", "chrome"]
-        if os.path.exists(COOKIES_FILE):
-            cmd += ["--cookies", COOKIES_FILE]
+        cookie_path = COOKIES_FILE
+        if "pornhub.com" in url.lower():
+            cookie_path = COOKIES_PH_FILE
+        if os.path.exists(cookie_path):
+            cmd += ["--cookies", cookie_path]
         proxy_url = get_proxy_url()
         if proxy_url:
             cmd += ["--proxy", proxy_url]
@@ -448,7 +451,14 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
         cmd.append(url)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
         if result.returncode != 0:
-            return None
+            if os.path.exists(cookie_path):
+                logger.warning("Format probe failed with cookies, retrying without cookies...")
+                cmd_no_cookies = [x for x in cmd if x != cookie_path and x != "--cookies"]
+                result = subprocess.run(cmd_no_cookies, capture_output=True, text=True, timeout=50)
+                if result.returncode != 0:
+                    return None
+            else:
+                return None
         info = json.loads(result.stdout)
         formats = info.get("formats", [])
         if not formats:
@@ -1333,20 +1343,33 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         ydl_opts['download_ranges'] = lambda info, ydl: [{'start_time': _st, 'end_time': _et}]
         ydl_opts['force_keyframes_at_cuts'] = True
 
+    filename = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
     except Exception as e:
-        if "impersonate" in ydl_opts:
+        if "cookiefile" in ydl_opts:
+            logger.warning("Download failed with cookies, retrying without cookies...")
+            del ydl_opts["cookiefile"]
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+            except Exception as e_inner:
+                e = e_inner
+        if "impersonate" in ydl_opts and not (filename and os.path.exists(filename)):
             logger.warning("Download failed with impersonate, retrying without...")
             del ydl_opts["impersonate"]
-            # Reset standard http headers
             ydl_opts["http_headers"] = base_headers
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-        else:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+            except Exception as e_inner:
+                e = e_inner
+        
+        if not (filename and os.path.exists(filename)):
             raise e
 
     if audio_only:
@@ -3427,11 +3450,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         return ydl.extract_info(url, download=False)
                 except Exception as e:
+                    if "cookiefile" in ydl_opts:
+                        logger.warning("Metadata extraction failed with cookies, retrying without...")
+                        del ydl_opts["cookiefile"]
+                        try:
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                return ydl.extract_info(url, download=False)
+                        except Exception as e_inner:
+                            e = e_inner
                     if "impersonate" in ydl_opts:
                         logger.warning("Metadata extraction failed with impersonate, retrying without...")
                         del ydl_opts["impersonate"]
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            return ydl.extract_info(url, download=False)
+                        try:
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                return ydl.extract_info(url, download=False)
+                        except Exception as e_inner:
+                            e = e_inner
                     raise e
             
             info = await loop.run_in_executor(None, extract_metadata)
