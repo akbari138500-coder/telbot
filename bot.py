@@ -150,6 +150,7 @@ DIVIDER = "═══════════════════════
 THIN_DIVIDER = "────────────────────────────"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt"))  # Path to cookies.txt for bot detection bypass
+COOKIES_PH_FILE = os.getenv("COOKIES_PH_FILE", os.path.join(BASE_DIR, "cookiesph.txt"))  # Path to cookiesph.txt for Pornhub
 
 # Initialize cookies.txt from environment variable (supports both raw text and base64)
 cookies_content = os.getenv("YOUTUBE_COOKIES_CONTENT")
@@ -161,15 +162,34 @@ if cookies_content:
             decoded = base64.b64decode(cookies_content.strip()).decode("utf-8")
             if "# Netscape" in decoded or "\t" in decoded:
                 cookies_content = decoded
-                logger.info("Successfully decoded cookies from base64 format")
+                logger.info("Successfully decoded YouTube cookies from base64 format")
         except Exception:
             pass
 
         with open(COOKIES_FILE, "w", encoding="utf-8") as f:
             f.write(cookies_content)
-        logger.info(f"Initialized cookies file from YOUTUBE_COOKIES_CONTENT environment variable ({len(cookies_content)} bytes)")
+        logger.info(f"Initialized YouTube cookies file from YOUTUBE_COOKIES_CONTENT environment variable ({len(cookies_content)} bytes)")
     except Exception as e:
-        logger.error(f"Failed to write cookies file from YOUTUBE_COOKIES_CONTENT environment variable: {e}")
+        logger.error(f"Failed to write YouTube cookies file from YOUTUBE_COOKIES_CONTENT: {e}")
+
+# Initialize cookiesph.txt from environment variable
+cookies_ph_content = os.getenv("PORNHUB_COOKIES_CONTENT")
+if cookies_ph_content:
+    try:
+        import base64
+        try:
+            decoded = base64.b64decode(cookies_ph_content.strip()).decode("utf-8")
+            if "# Netscape" in decoded or "\t" in decoded:
+                cookies_ph_content = decoded
+                logger.info("Successfully decoded Pornhub cookies from base64 format")
+        except Exception:
+            pass
+
+        with open(COOKIES_PH_FILE, "w", encoding="utf-8") as f:
+            f.write(cookies_ph_content)
+        logger.info(f"Initialized Pornhub cookies file from PORNHUB_COOKIES_CONTENT environment variable ({len(cookies_ph_content)} bytes)")
+    except Exception as e:
+        logger.error(f"Failed to write Pornhub cookies file from PORNHUB_COOKIES_CONTENT: {e}")
 
 # State Cache & Databases
 URL_CACHE = {}          # Store media details (uuid -> data)
@@ -177,21 +197,25 @@ USER_STATES = {}        # User states (user_id -> {'state': '...', 'url_id': '..
 download_queue: asyncio.Queue = asyncio.Queue()  # Global sequential task queue
 MAX_CONCURRENT_DOWNLOADS = 3  # Allow up to 3 parallel downloads
 
-def get_ydl_cookie_opts() -> dict:
+def get_ydl_cookie_opts(url: str | None = None) -> dict:
     """Returns yt-dlp cookie options to bypass bot detection on YouTube/PornHub."""
     opts = {}
-    if os.path.exists(COOKIES_FILE):
+    cookie_path = COOKIES_FILE
+    if url and "pornhub.com" in url.lower():
+        cookie_path = COOKIES_PH_FILE
+
+    if os.path.exists(cookie_path):
         # Always sanitize before use to make sure it never crashes yt-dlp
-        sanitize_cookies_file(COOKIES_FILE)
+        sanitize_cookies_file(cookie_path)
         try:
-            with open(COOKIES_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            with open(cookie_path, "r", encoding="utf-8", errors="ignore") as f:
                 first_line = f.readline().strip().lstrip('\ufeff')
             if first_line.startswith("# Netscape"):
-                opts["cookiefile"] = COOKIES_FILE
+                opts["cookiefile"] = cookie_path
             else:
-                logger.warning(f"Cookies file does not start with Netscape header. Skipping to avoid yt-dlp crash.")
+                logger.warning(f"Cookies file {cookie_path} does not start with Netscape header. Skipping to avoid yt-dlp crash.")
         except Exception as e:
-            logger.error(f"Failed to read cookies file for validation: {e}")
+            logger.error(f"Failed to read cookies file {cookie_path} for validation: {e}")
     return opts
 
 def sanitize_cookies_file(filepath: str):
@@ -1292,7 +1316,7 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "extractor_args": get_youtube_extractor_args({"skip": ["translated_subs"]}),
         "socket_timeout": 30,
         "js_runtimes": {"node": {}},
-        **get_ydl_cookie_opts(),
+        **get_ydl_cookie_opts(url),
         **site_opts,
     }
 
@@ -1938,7 +1962,7 @@ def run_youtube_search(query, page=1):
         'extract_flat': True,
         'extractor_args': get_youtube_extractor_args(),
         'js_runtimes': {'node': {}},
-        **get_ydl_cookie_opts(),
+        **get_ydl_cookie_opts(search_url),
         **get_site_specific_opts(search_url),
     }
     proxy_url = get_proxy_url()
@@ -2047,7 +2071,7 @@ async def run_pornhub_search(query, page=1):
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 },
-                **get_ydl_cookie_opts(),
+                **get_ydl_cookie_opts(search_url),
             }
             proxy_url = get_proxy_url()
             if proxy_url:
@@ -3294,7 +3318,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             'socket_timeout': 20,
                             'extractor_args': get_youtube_extractor_args(),
                             'js_runtimes': {'node': {}},
-                            **get_ydl_cookie_opts(),
+                            **get_ydl_cookie_opts(url),
                         }
                         proxy_url = get_proxy_url()
                         if proxy_url:
@@ -3396,7 +3420,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'socket_timeout': 15,
                     'extractor_args': get_youtube_extractor_args(),
                     'js_runtimes': {'node': {}},
-                    **get_ydl_cookie_opts(),
+                    **get_ydl_cookie_opts(url),
                     **get_site_specific_opts(url),
                 }
                 try:
@@ -3694,8 +3718,8 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_subtitle_upload(update, context)
             return
 
-        # Admin: save cookies.txt for bot detection bypass
-        if filename.lower() == "cookies.txt":
+        # Admin: save cookies.txt or cookiesph.txt for bot detection bypass
+        if filename.lower() in ("cookies.txt", "cookiesph.txt"):
             is_admin = False
             if ADMIN_USER_ID and ADMIN_USER_ID.strip() and "YOUR_ADMIN_USER_ID" not in ADMIN_USER_ID:
                 if str(user_id) == str(ADMIN_USER_ID):
@@ -3712,13 +3736,14 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 return
 
-            status = await message.reply_text("🍪 *Saving cookies.txt...*", parse_mode="Markdown")
+            target_file = COOKIES_FILE if filename.lower() == "cookies.txt" else COOKIES_PH_FILE
+            status = await message.reply_text(f"🍪 *Saving {filename}...*", parse_mode="Markdown")
             tg_file = await context.bot.get_file(file_id)
-            await tg_file.download_to_drive(COOKIES_FILE)
-            file_sz = os.path.getsize(COOKIES_FILE)
+            await tg_file.download_to_drive(target_file)
+            file_sz = os.path.getsize(target_file)
             await status.edit_text(
-                f"✅ *cookies.txt saved!*\n`{file_sz} bytes`\n\n"
-                "🔄 YouTube/PornHub will now use your cookies to bypass bot detection.",
+                f"✅ *{filename} saved!*\n`{file_sz} bytes`\n\n"
+                f"🔄 Bot will now use your cookies to bypass bot detection on the respective platform.",
                 parse_mode="Markdown"
             )
             return
@@ -5306,7 +5331,7 @@ async def add_playlist_to_queue(url, message_to_reply, strategy, user_id):
                     'extract_flat': True,
                     'extractor_args': get_youtube_extractor_args(),
                     'js_runtimes': {'node': {}},
-                    **get_ydl_cookie_opts(),
+                    **get_ydl_cookie_opts(url),
                     **get_site_specific_opts(url),
                 }
                 proxy_url = get_proxy_url()
