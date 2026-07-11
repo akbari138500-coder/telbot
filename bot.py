@@ -151,6 +151,16 @@ THIN_DIVIDER = "─────────────────────�
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIES_FILE = os.getenv("COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt"))  # Path to cookies.txt for bot detection bypass
 
+# Initialize cookies.txt from environment variable (useful for ephemeral environments like Render)
+cookies_content = os.getenv("YOUTUBE_COOKIES_CONTENT")
+if cookies_content:
+    try:
+        with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+            f.write(cookies_content)
+        logger.info(f"Initialized cookies file from YOUTUBE_COOKIES_CONTENT environment variable ({len(cookies_content)} bytes)")
+    except Exception as e:
+        logger.error(f"Failed to write cookies file from YOUTUBE_COOKIES_CONTENT environment variable: {e}")
+
 # State Cache & Databases
 URL_CACHE = {}          # Store media details (uuid -> data)
 USER_STATES = {}        # User states (user_id -> {'state': '...', 'url_id': '...'})
@@ -5409,6 +5419,8 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ `cookies.txt` is *active*\n"
             f"📦 Size: `{size} bytes`\n"
             f"🕐 Updated: `{mod_time}`\n\n"
+            f"💡 *Render.com Note:* If you redeploy or restart the bot, this file will be deleted. "
+            f"To keep cookies permanently on Render, copy the file contents and save it in the Render dashboard environment variables as `YOUTUBE_COOKIES_CONTENT`.\n\n"
             f"_To update: send a new `cookies.txt` file._",
             parse_mode="Markdown"
         )
@@ -5424,6 +5436,10 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"2️⃣ Visit youtube.com while *logged in*\n"
             f"3️⃣ Export cookies as `cookies.txt`\n"
             f"4️⃣ Send the file *directly to this bot*\n\n"
+            f"💡 *Render.com Persistent Cookies:*\n"
+            f"Since Render containers have ephemeral disks, uploaded files disappear on restart/redeploy. "
+            f"To make cookies permanent, copy the contents of `cookies.txt` and add it as an Environment Variable named "
+            f"`YOUTUBE_COOKIES_CONTENT` in your Render dashboard settings.\n\n"
             f"📁 Saved to: `{COOKIES_FILE}`",
             parse_mode="Markdown",
             disable_web_page_preview=True
