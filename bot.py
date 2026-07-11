@@ -3448,7 +3448,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Direct link download
         await status_msg.delete()
-        import uuid
         url_id = uuid.uuid4().hex[:8]
         URL_CACHE[url_id] = {
             'url': url,
