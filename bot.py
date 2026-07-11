@@ -2819,6 +2819,71 @@ async def query_aerolink(prompt: str, file_data: dict | None = None) -> str:
     
     return "⚠️ AI Error: All Aerolink models failed."
 
+async def query_nvidia(prompt: str, file_data: dict | None = None) -> str:
+    import aiohttp
+    import os
+    api_key = os.getenv("NVIDIA_API_KEY")
+    if not api_key:
+        return "⚠️ AI Error: NVIDIA_API_KEY is not set."
+        
+    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    message_content = []
+    if prompt:
+        message_content.append({"type": "text", "text": prompt})
+    
+    if file_data:
+        mime = file_data["mime_type"]
+        if mime.startswith("image/"):
+            message_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime};base64,{file_data['data']}"
+                }
+            })
+        elif mime == "application/pdf":
+            message_content.append({
+                "type": "text",
+                "text": f"[Attached PDF file of type {mime}]"
+            })
+            
+    if len(message_content) == 1 and message_content[0]["type"] == "text":
+        messages = [{"role": "user", "content": prompt}]
+    else:
+        messages = [{"role": "user", "content": message_content}]
+        
+    payload = {
+        "model": "z-ai/glm-5.2",
+        "messages": messages,
+        "temperature": 0.6,
+        "max_tokens": 4096
+    }
+    
+    proxy_url = get_proxy_url()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, proxy=proxy_url,
+                                   timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        text = choices[0].get("message", {}).get("content", "")
+                        if text:
+                            logger.info("Nvidia NIM success with model z-ai/glm-5.2")
+                            return text
+                else:
+                    error_text = await resp.text()
+                    logger.warning(f"Nvidia API failed: {resp.status} - {error_text[:100]}")
+    except Exception as e:
+        logger.warning(f"Nvidia API exception: {e}")
+        
+    return "⚠️ AI Error: Nvidia NIM GLM 5.2 model call failed."
+
 # =====================================================================
 # Main Message Handler (Inputs & Routing)
 # =====================================================================
@@ -2994,7 +3059,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🤖 AI Chat":
         current_engine = USER_STATES.get(user_id, {}).get("ai_engine")
         if current_engine:
-            engine_names = {"gemini": "✨ Gemini", "aerolink": "🚀 Aerolink AI"}
+            engine_names = {"gemini": "✨ Gemini", "aerolink": "🚀 Aerolink AI", "nvidia": "🟢 Nvidia GLM 5.2"}
             engine_name = engine_names.get(current_engine, "AI")
             keyboard = [
                 [InlineKeyboardButton(f"✅ Currently: {engine_name}", callback_data="ainoop")],
@@ -3016,6 +3081,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [
                     InlineKeyboardButton("✨ Gemini", callback_data="ai_engine:gemini"),
                     InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
+                ],
+                [
+                    InlineKeyboardButton("🟢 Nvidia GLM 5.2", callback_data="ai_engine:nvidia")
                 ]
             ]
             await message.reply_text(
@@ -3136,6 +3204,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 response = await query_gemini(text)
             elif engine == "aerolink":
                 response = await query_aerolink(text)
+            elif engine == "nvidia":
+                response = await query_nvidia(text)
             else:
                 response = await query_gemini(text)
             
@@ -3705,6 +3775,8 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
                 response = await query_gemini(caption, file_data)
             elif engine == "aerolink":
                 response = await query_aerolink(caption, file_data)
+            elif engine == "nvidia":
+                response = await query_nvidia(caption, file_data)
             else:
                 response = await query_gemini(caption, file_data)
                 
@@ -3852,7 +3924,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         engine_names = {
             "gemini": "✨ Google Gemini",
-            "aerolink": "🚀 Aerolink AI"
+            "aerolink": "🚀 Aerolink AI",
+            "nvidia": "🟢 Nvidia GLM 5.2"
         }
         engine_name = engine_names.get(engine, engine)
         
@@ -3873,6 +3946,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [
                 InlineKeyboardButton("✨ Gemini", callback_data="ai_engine:gemini"),
                 InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
+            ],
+            [
+                InlineKeyboardButton("🟢 Nvidia GLM 5.2", callback_data="ai_engine:nvidia")
             ]
         ]
         await query.message.edit_text(
