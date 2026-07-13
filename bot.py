@@ -198,14 +198,18 @@ download_queue: asyncio.Queue = asyncio.Queue()  # Global sequential task queue
 MAX_CONCURRENT_DOWNLOADS = 3  # Allow up to 3 parallel downloads
 
 def get_ydl_cookie_opts(url: str | None = None) -> dict:
-    """Returns yt-dlp cookie options to bypass bot detection on YouTube/PornHub."""
+    """Returns yt-dlp cookie options. YouTube uses android_vr client (no cookies needed).
+    Cookies are only passed for adult sites (PornHub, etc.) that require auth."""
     opts = {}
-    cookie_path = COOKIES_FILE
-    if url and "pornhub.com" in url.lower():
-        cookie_path = COOKIES_PH_FILE
+
+    # IMPORTANT: Never pass cookies for YouTube - android_vr client works without them
+    # and passing invalid/expired cookies causes instant bot detection block.
+    if url and any(x in url.lower() for x in ["youtube.com", "youtu.be", "ytsearch"]):
+        return opts
+
+    cookie_path = COOKIES_PH_FILE if (url and "pornhub.com" in url.lower()) else COOKIES_FILE
 
     if os.path.exists(cookie_path):
-        # Always sanitize before use to make sure it never crashes yt-dlp
         sanitize_cookies_file(cookie_path)
         try:
             with open(cookie_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -213,9 +217,9 @@ def get_ydl_cookie_opts(url: str | None = None) -> dict:
             if first_line.startswith("# Netscape"):
                 opts["cookiefile"] = cookie_path
             else:
-                logger.warning(f"Cookies file {cookie_path} does not start with Netscape header. Skipping to avoid yt-dlp crash.")
+                logger.warning(f"Cookies file {cookie_path} does not start with Netscape header. Skipping.")
         except Exception as e:
-            logger.error(f"Failed to read cookies file {cookie_path} for validation: {e}")
+            logger.error(f"Failed to read cookies file {cookie_path}: {e}")
     return opts
 
 def sanitize_cookies_file(filepath: str):
@@ -367,8 +371,8 @@ async def _cobalt_download(url: str, dest_dir: str, audio_only: bool = False) ->
 
 
 # Working YouTube player clients (yt-dlp 2026.07+).
-# mediaconnect is unsupported; web / web_creator require sign-in cookies.
-# android_vr is the default jsless client and works without PO tokens.
+# android_vr is the default jsless client and works without PO tokens or cookies.
+# tv_embedded, web_embedded are fallbacks. mweb also works without auth.
 YOUTUBE_PLAYER_CLIENTS = ["android_vr", "web_embedded", "mweb"]
 
 
@@ -438,10 +442,8 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
                "--js-runtimes", "node"]
         if is_impersonate_site(url) and _HAS_IMPERSONATE:
             cmd += ["--impersonate", "chrome"]
-        cookie_path = COOKIES_FILE
-        if "pornhub.com" in url.lower():
-            cookie_path = COOKIES_PH_FILE
-        if os.path.exists(cookie_path):
+        cookie_path = COOKIES_PH_FILE if "pornhub.com" in url.lower() else None
+        if cookie_path and os.path.exists(cookie_path):
             cmd += ["--cookies", cookie_path]
         proxy_url = get_proxy_url()
         if proxy_url:
@@ -5316,29 +5318,26 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                 if (isinstance(e, AssertionError) or "assertion" in err_msg.lower()) and "cookie" in err_msg.lower():
                     await status_msg.edit_text(
                         f"❌ *Cookie Format Error / خطای فرمت کوکی*\n\n"
-                        f"The uploaded `cookies.txt` file contains formatting errors (invalid Netscape format), "
-                        f"which is causing `yt-dlp` to crash.\n\n"
-                        f"Please re-export your cookies using a browser extension (like *Get cookies.txt LOCALLY*), "
-                        f"ensuring it's in Netscape format, and send it to the bot again.",
+                        f"The uploaded `cookies.txt` file contains formatting errors. "
+                        f"Please re-export using *Get cookies.txt LOCALLY* extension and send again.",
                         parse_mode="Markdown"
                     )
-                elif any(x in err_msg.lower() for x in ["confirm you", "not a bot", "forbidden", "403", "429"]):
+                elif any(x in err_msg.lower() for x in ["confirm you", "not a bot", "forbidden", "403", "429", "sign in"]):
                     await status_msg.edit_text(
-                        f"❌ *Download Failed (YouTube Bot Detection / Block)*\n\n"
-                        f"Error: `{err_msg[:200]}`\n\n"
-                        f"Run the /cookies command for step-by-step instructions.",
+                        f"❌ *Download Failed / خطای دانلود*\n\n"
+                        f"`{err_msg[:250]}`\n\n"
+                        f"⚠️ This video may be age-restricted, private, or unavailable in this region.",
                         parse_mode="Markdown"
                     )
                 elif "format is not available" in err_msg.lower():
                     await status_msg.edit_text(
-                        f"❌ *Format not available*\n\n"
-                        f"Error: `{err_msg[:200]}`\n\n"
+                        f"❌ *Format not available / فرمت موجود نیست*\n\n"
                         f"Try a different resolution or format.",
                         parse_mode="Markdown"
                     )
                 else:
                     display_msg = err_msg if err_msg.strip() else f"Unknown error ({type(e).__name__})"
-                    await status_msg.edit_text(f"❌ *Failed download task:* `{display_msg[:200]}`", parse_mode="Markdown")
+                    await status_msg.edit_text(f"❌ *Failed:* `{display_msg[:250]}`", parse_mode="Markdown")
             except Exception:
                 pass
 
