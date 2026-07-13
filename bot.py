@@ -2747,14 +2747,11 @@ async def query_gemini(prompt: str, file_data: dict | None = None) -> str:
     if not api_key:
         return "⚠️ AI Error: GEMINI_API_KEY is not set in .env file."
     
-    # Try multiple model names in order of preference
     models = [
-        "gemini-3.1-flash-lite",
-        "gemini-3.1-flash-lite-preview",
-        "gemini-3.1-flash",
         "gemini-2.5-flash",
-        "gemini-2.5-pro",
+        "gemini-2.5-flash-lite-preview-06-17",
         "gemini-2.0-flash",
+        "gemini-1.5-flash",
     ]
     
     proxy_url = get_proxy_url()
@@ -2774,7 +2771,11 @@ async def query_gemini(prompt: str, file_data: dict | None = None) -> str:
         return "⚠️ AI Error: No text or file provided."
         
     payload = {
-        "contents": [{"parts": parts}]
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "maxOutputTokens": 8192,
+            "temperature": 0.7
+        }
     }
     
     for model in models:
@@ -2782,18 +2783,21 @@ async def query_gemini(prompt: str, file_data: dict | None = None) -> str:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, proxy=proxy_url, 
-                                       timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                       timeout=aiohttp.ClientTimeout(total=120, connect=15)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         candidates = data.get("candidates", [])
                         if candidates:
-                            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            parts_out = candidates[0].get("content", {}).get("parts", [])
+                            text = "".join(p.get("text", "") for p in parts_out)
                             if text:
                                 logger.info(f"Gemini success with model {model}")
                                 return text
                     else:
                         error_text = await resp.text()
-                        logger.warning(f"Gemini model {model} failed: {resp.status} - {error_text[:100]}")
+                        logger.warning(f"Gemini model {model} failed: {resp.status} - {error_text[:150]}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Gemini model {model} timed out")
         except Exception as e:
             logger.warning(f"Gemini model {model} exception: {e}")
     
@@ -2855,24 +2859,26 @@ async def query_aerolink(prompt: str, file_data: dict | None = None) -> str:
     for model in models:
         payload = {
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "messages": [{"role": "user", "content": content}]
         }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, headers=headers, proxy=proxy_url,
-                                       timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                                       timeout=aiohttp.ClientTimeout(total=120, connect=15)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         content_blocks = data.get("content", [])
                         if content_blocks:
-                            text = content_blocks[0].get("text", "")
+                            text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
                             if text:
                                 logger.info(f"Aerolink success with model {model}")
                                 return text
                     else:
                         error_text = await resp.text()
                         logger.warning(f"Aerolink model {model} failed: {resp.status} - {error_text[:100]}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Aerolink model {model} timed out")
         except Exception as e:
             logger.warning(f"Aerolink model {model} exception: {e}")
     
@@ -3248,41 +3254,94 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if engine:
             engine_names = {
                 "gemini": "Gemini",
-                "aerolink": "Aerolink AI"
+                "aerolink": "Aerolink AI",
+                "nvidia": "Nvidia GLM 5.2"
             }
             engine_name = engine_names.get(engine, "AI")
             
             status_msg = await message.reply_text(f"🤖 *Thinking ({engine_name})... / در حال پردازش*", parse_mode="Markdown")
+
+            # Keep typing indicator alive during heavy AI tasks
+            stop_typing = asyncio.Event()
+            async def keep_typing():
+                while not stop_typing.is_set():
+                    try:
+                        await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(4)
+            typing_task = asyncio.create_task(keep_typing())
+
             try:
-                await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-            except Exception:
-                pass
-            
-            # Route to the correct AI engine
-            if engine == "gemini":
-                response = await query_gemini(text)
-            elif engine == "aerolink":
-                response = await query_aerolink(text)
-            elif engine == "nvidia":
-                response = await query_nvidia(text)
-            else:
-                response = await query_gemini(text)
+                # Route to the correct AI engine
+                if engine == "gemini":
+                    response = await query_gemini(text)
+                elif engine == "aerolink":
+                    response = await query_aerolink(text)
+                elif engine == "nvidia":
+                    response = await query_nvidia(text)
+                else:
+                    response = await query_gemini(text)
+            except asyncio.TimeoutError:
+                response = "⚠️ AI Error: Request timed out. Try a shorter prompt or try again later."
+            except Exception as e:
+                response = f"⚠️ AI Error: {str(e)[:200]}"
+            finally:
+                stop_typing.set()
+                typing_task.cancel()
             
             # Format Markdown to be more compatible with Telegram's legacy Markdown
             formatted_text = response
-            formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text) # Convert **bold** to *bold*
+            formatted_text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted_text, flags=re.DOTALL)
             formatted_text = re.sub(r'^###\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
             formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
             formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
             
-            final_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  *{engine_name}*          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{formatted_text}"
-            
+            header = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  *{engine_name}*          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            MAX_TG_LEN = 4000
+
+            async def send_ai_response(text_body: str, use_markdown: bool = True):
+                """Send long AI response split into chunks if needed."""
+                chunks = [text_body[i:i + MAX_TG_LEN] for i in range(0, len(text_body), MAX_TG_LEN)]
+                first = True
+                for chunk in chunks:
+                    if first:
+                        msg_text = header + chunk
+                        first = False
+                    else:
+                        msg_text = chunk
+                    try:
+                        if first is False and chunk == chunks[0]:
+                            # Edit first message
+                            if use_markdown:
+                                await status_msg.edit_text(msg_text, parse_mode="Markdown")
+                            else:
+                                await status_msg.edit_text(msg_text)
+                        else:
+                            if use_markdown:
+                                await message.reply_text(msg_text, parse_mode="Markdown")
+                            else:
+                                await message.reply_text(msg_text)
+                    except Exception:
+                        await message.reply_text(msg_text)
+
+            # Split long responses into multiple messages
+            all_chunks = [formatted_text[i:i + MAX_TG_LEN] for i in range(0, max(1, len(formatted_text)), MAX_TG_LEN)]
             try:
-                await status_msg.edit_text(final_msg, parse_mode="Markdown")
-            except Exception as e:
-                # Fallback to plain text if Telegram markdown parser fails (due to unclosed tags)
-                plain_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  {engine_name}          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{response}"
-                await status_msg.edit_text(plain_msg)
+                first_chunk = header + all_chunks[0]
+                await status_msg.edit_text(first_chunk, parse_mode="Markdown")
+                for chunk in all_chunks[1:]:
+                    await message.reply_text(chunk, parse_mode="Markdown")
+            except Exception:
+                # Fallback: plain text
+                try:
+                    plain_header = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  {engine_name}          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                    plain_chunks = [response[i:i + MAX_TG_LEN] for i in range(0, max(1, len(response)), MAX_TG_LEN)]
+                    await status_msg.edit_text(plain_header + plain_chunks[0])
+                    for chunk in plain_chunks[1:]:
+                        await message.reply_text(chunk)
+                except Exception:
+                    pass
             return
 
     raw_url = urls[0]
