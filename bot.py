@@ -3551,15 +3551,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             def extract_metadata():
+                is_youtube = is_youtube_url(url)
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
-                    'socket_timeout': 15,
+                    'socket_timeout': 25,
                     'extractor_args': get_youtube_extractor_args(),
-                    'js_runtimes': {'node': {}},
-                    **get_ydl_cookie_opts(url),
                     **get_site_specific_opts(url),
                 }
+                # Do not pass cookies for YouTube (relies on android_vr)
+                if not is_youtube:
+                    ydl_opts.update(get_ydl_cookie_opts(url))
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         return ydl.extract_info(url, download=False)
@@ -3663,15 +3665,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
                 await add_to_queue(url, message, "video", custom_name, user_id=user_id)
-            elif any(x in err_str.lower() for x in ["confirm you", "not a bot", "format is not available", "cookies", "forbidden", "403", "429"]):
+            elif any(x in err_str.lower() for x in ["confirm you", "not a bot", "forbidden", "403", "429", "sign in"]):
                 await status_msg.edit_text(
-                    "⚠️ *YouTube Bot Detection Active / بلاک توسط یوتیوب*\n\n"
-                    "🍪 YouTube has blocked this request. To bypass this, please upload a `cookies.txt` file "
-                    "or run the /cookies command for step-by-step instructions.\n\n"
-                    "🔄 *Attempting queue download anyway...*",
+                    "⚠️ *YouTube Bot Detection Blocked Preview / عدم امکان دریافت مشخصات*\n\n"
+                    "یوتیوب دریافت مشخصات ویدیو را مسدود کرد، اما سیستم تلاش می‌کند آن را مستقیماً دانلود کند.\n"
+                    "🔄 *در حال ارسال به صف دانلود...*",
                     parse_mode="Markdown"
                 )
                 await add_to_queue(url, message, "video", custom_name, user_id=user_id)
+            elif any(x in err_str.lower() for x in ["video unavailable", "has been removed", "private video", "members-only"]):
+                await status_msg.edit_text(
+                    f"❌ *Video Unavailable / ویدیو در دسترس نیست*\n\n"
+                    f"این ویدیو حذف شده، خصوصی است، یا در منطقه شما پخش نمی‌شود.\n"
+                    f"The video is deleted, private, or geo-restricted.",
+                    parse_mode="Markdown"
+                )
             elif is_media_domain or is_streaming:
                 if is_impersonate_site(url):
                     # Real fix: updated yt-dlp + --impersonate chrome handles this
