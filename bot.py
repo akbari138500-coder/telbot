@@ -5382,11 +5382,18 @@ async def add_to_queue(url, message_to_reply, format_opt, custom_name, start_tim
                         f"Please re-export using *Get cookies.txt LOCALLY* extension and send again.",
                         parse_mode="Markdown"
                     )
+                elif any(x in err_msg.lower() for x in ["video unavailable", "this video is not available", "has been removed", "private video", "members-only"]):
+                    await status_msg.edit_text(
+                        f"❌ *Video Unavailable / ویدیو در دسترس نیست*\n\n"
+                        f"این ویدیو حذف شده، خصوصی است، یا در منطقه شما پخش نمی‌شود.\n"
+                        f"The video is deleted, private, or geo-restricted.",
+                        parse_mode="Markdown"
+                    )
                 elif any(x in err_msg.lower() for x in ["confirm you", "not a bot", "forbidden", "403", "429", "sign in"]):
                     await status_msg.edit_text(
-                        f"❌ *Download Failed / خطای دانلود*\n\n"
+                        f"❌ *Download Blocked / دانلود بلاک شد*\n\n"
                         f"`{err_msg[:250]}`\n\n"
-                        f"⚠️ This video may be age-restricted, private, or unavailable in this region.",
+                        f"⚠️ لینک دیگری امتحان کنید یا چند دقیقه صبر کنید.",
                         parse_mode="Markdown"
                     )
                 elif "format is not available" in err_msg.lower():
