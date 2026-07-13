@@ -2952,6 +2952,52 @@ async def query_nvidia(prompt: str, file_data: dict | None = None) -> str:
         
     return "⚠️ AI Error: Nvidia NIM GLM 5.2 model call failed."
 
+async def query_groq(prompt: str, file_data: dict | None = None) -> str:
+    import aiohttp
+    import os
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return "⚠️ AI Error: GROQ_API_KEY is not set in .env."
+        
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    if file_data:
+        return "⚠️ AI Error: Groq only supports text prompts in this bot at the moment."
+            
+    messages = [{"role": "user", "content": prompt}]
+        
+    payload = {
+        "model": "llama3-70b-8192",
+        "messages": messages,
+        "temperature": 0.6,
+        "max_tokens": 4096
+    }
+    
+    proxy_url = get_proxy_url()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, proxy=proxy_url,
+                                   timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        text = choices[0].get("message", {}).get("content", "")
+                        if text:
+                            logger.info("Groq success with model llama3-70b-8192")
+                            return text
+                else:
+                    error_text = await resp.text()
+                    logger.warning(f"Groq API failed: {resp.status} - {error_text[:100]}")
+    except Exception as e:
+        logger.warning(f"Groq API exception: {e}")
+        
+    return "⚠️ AI Error: Groq Llama-3 model call failed."
+
 # =====================================================================
 # Main Message Handler (Inputs & Routing)
 # =====================================================================
@@ -3127,7 +3173,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🤖 AI Chat":
         current_engine = USER_STATES.get(user_id, {}).get("ai_engine")
         if current_engine:
-            engine_names = {"gemini": "✨ Gemini", "aerolink": "🚀 Aerolink AI", "nvidia": "🟢 Nvidia GLM 5.2"}
+            engine_names = {"gemini": "✨ Gemini", "aerolink": "🚀 Aerolink AI", "nvidia": "🟢 Nvidia GLM 5.2", "groq": "⚡ Groq (Llama3-70b)"}
             engine_name = engine_names.get(current_engine, "AI")
             keyboard = [
                 [InlineKeyboardButton(f"✅ Currently: {engine_name}", callback_data="ainoop")],
@@ -3151,7 +3197,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
                 ],
                 [
-                    InlineKeyboardButton("🟢 Nvidia GLM 5.2", callback_data="ai_engine:nvidia")
+                    InlineKeyboardButton("🟢 Nvidia GLM 5.2", callback_data="ai_engine:nvidia"),
+                    InlineKeyboardButton("⚡ Groq (Llama-3)", callback_data="ai_engine:groq")
                 ]
             ]
             await message.reply_text(
@@ -3258,7 +3305,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             engine_names = {
                 "gemini": "Gemini",
                 "aerolink": "Aerolink AI",
-                "nvidia": "Nvidia GLM 5.2"
+                "nvidia": "Nvidia GLM 5.2",
+                "groq": "Groq Llama-3"
             }
             engine_name = engine_names.get(engine, "AI")
             
@@ -3283,6 +3331,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     response = await query_aerolink(text)
                 elif engine == "nvidia":
                     response = await query_nvidia(text)
+                elif engine == "groq":
+                    response = await query_groq(text)
                 else:
                     response = await query_gemini(text)
             except asyncio.TimeoutError:
@@ -3910,6 +3960,8 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
                 response = await query_aerolink(caption, file_data)
             elif engine == "nvidia":
                 response = await query_nvidia(caption, file_data)
+            elif engine == "groq":
+                response = await query_groq(caption, file_data)
             else:
                 response = await query_gemini(caption, file_data)
                 
@@ -3920,7 +3972,7 @@ async def handle_incoming_file(update: Update, context: ContextTypes.DEFAULT_TYP
             formatted_text = re.sub(r'^##\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
             formatted_text = re.sub(r'^#\s+(.+)$', r'*\1*', formatted_text, flags=re.MULTILINE)
             
-            engine_names = {"gemini": "Gemini", "aerolink": "Aerolink AI"}
+            engine_names = {"gemini": "Gemini", "aerolink": "Aerolink AI", "nvidia": "Nvidia GLM", "groq": "Groq"}
             engine_name = engine_names.get(engine, "AI")
             final_msg = f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃  ✨  *{engine_name}*          ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n{formatted_text}"
             
@@ -4058,7 +4110,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         engine_names = {
             "gemini": "✨ Google Gemini",
             "aerolink": "🚀 Aerolink AI",
-            "nvidia": "🟢 Nvidia GLM 5.2"
+            "nvidia": "🟢 Nvidia GLM 5.2",
+            "groq": "⚡ Groq (Llama3-70b)"
         }
         engine_name = engine_names.get(engine, engine)
         
@@ -4081,7 +4134,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🚀 Aerolink AI", callback_data="ai_engine:aerolink")
             ],
             [
-                InlineKeyboardButton("🟢 Nvidia GLM 5.2", callback_data="ai_engine:nvidia")
+                InlineKeyboardButton("🟢 Nvidia GLM 5.2", callback_data="ai_engine:nvidia"),
+                InlineKeyboardButton("⚡ Groq (Llama-3)", callback_data="ai_engine:groq")
             ]
         ]
         await query.message.edit_text(
