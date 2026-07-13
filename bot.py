@@ -4907,31 +4907,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url_id = data[1]
         cached = URL_CACHE.get(url_id)
         if not cached:
-            await query.edit_message_text("❌ Session expired. Please search again.")
+            await query.edit_message_text("❌ Session expired. Please send link again.")
             return
+
+        duration_str = format_seconds(cached['duration']) if cached.get('duration') else "?"
+        title = cached.get('title', 'Video')
+        title_short = title[:55] + ("…" if len(title) > 55 else "")
 
         keyboard = [
             [
-                InlineKeyboardButton("🎥 Video (ویدیو)", callback_data=f"dmethod:{url_id}:video"),
-                InlineKeyboardButton("⚙️ Resolution (کیفیت)", callback_data=f"resopts:{url_id}")
+                InlineKeyboardButton("🎥 Best Quality (HD)", callback_data=f"dl:{url_id}:video"),
+                InlineKeyboardButton("🎤 MP3 Audio",         callback_data=f"dl:{url_id}:audio"),
             ],
             [
-                InlineKeyboardButton("🎵 MP3 Audio (صدا)", callback_data=f"dmethod:{url_id}:audio"),
-                InlineKeyboardButton("✂️ Trim Range (برش)", callback_data=f"dl:{url_id}:trim"),
+                InlineKeyboardButton("⚙️ 1080p", callback_data=f"dl:{url_id}:1080p"),
+                InlineKeyboardButton("⚙️ 720p",  callback_data=f"dl:{url_id}:720p"),
+                InlineKeyboardButton("⚙️ 480p",  callback_data=f"dl:{url_id}:480p"),
             ],
-            [InlineKeyboardButton("❌ Cancel (لغو)", callback_data=f"dl:{url_id}:cancel")]
+            [
+                InlineKeyboardButton("⚙️ 360p",      callback_data=f"dl:{url_id}:360p"),
+                InlineKeyboardButton("✂️ Trim / Cut", callback_data=f"dl:{url_id}:trim"),
+            ],
+            [InlineKeyboardButton("❌ Cancel / لغو", callback_data=f"dl:{url_id}:cancel")]
         ]
         if cached.get('duration') and cached['duration'] <= 15:
-            keyboard[1].append(InlineKeyboardButton("🖼 Convert to GIF", callback_data=f"dmethod:{url_id}:gif"))
+            keyboard[1].append(InlineKeyboardButton("🖼 GIF", callback_data=f"dl:{url_id}:gif"))
 
-        duration_str = f"{format_seconds(cached['duration'])}" if cached.get('duration') else "unknown"
         await query.edit_message_text(
             f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-            f"┃  📥  *DOWNLOAD OPTIONS*   ┃\n"
+            f"┃  📊  *DOWNLOAD*           ┃\n"
             f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-            f"🎥 `{cached['title']}`\n"
+            f"🎥 `{title_short}`\n"
             f"⏱ `{duration_str}`\n\n"
-            f"👇 _Choose format:_",
+            f"👇 _کیفیت مورد نظر را انتخاب کنید:_",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -4953,7 +4961,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         URL_CACHE.pop(url_id, None)
         return
 
-    # Handle Download Method Selection (Telegram vs uplod.ir)
+    # Handle Download Method — routes directly to queue (legacy compat kept)
     if action == "dmethod":
         url_id = data[1]
         format_choice = data[2]
@@ -4961,37 +4969,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not cached:
             await query.edit_message_text("❌ Session expired. Send link again.")
             return
-
-        format_labels = {
-            "video": "🎥 Video",
-            "audio": "🎵 MP3 Audio",
-            "gif": "🖼 GIF",
-            "1080p": "🎥 1080p Video",
-            "720p": "🎥 720p Video",
-            "480p": "🎥 480p Video",
-            "360p": "🎥 360p Video",
-        }
-        label = format_labels.get(format_choice, format_choice)
-
-        keyboard = [
-            [
-                InlineKeyboardButton("📱 Send to Telegram", callback_data=f"dl:{url_id}:{format_choice}:tg"),
-                InlineKeyboardButton("🌐 Upload to uplod.ir", callback_data=f"dl:{url_id}:{format_choice}:web")
-            ],
-            [InlineKeyboardButton("◀️ Back (بازگشت)", callback_data=f"opt:{url_id}")]
-        ]
-        await query.edit_message_text(
-            f"┏━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-            f"┃  📤  *DELIVERY METHOD*    ┃\n"
-            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-            f"🎥 `{cached['title']}`\n"
-            f"📋 Format: *{label}*\n\n"
-            f"How do you want to receive the file?\n"
-            f"فایل رو چطوری تحویل بگیرید؟\n\n"
-            f"{THIN_DIVIDER}",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
+        url = cached['url']
+        start_t = cached.get('start_time')
+        end_t   = cached.get('end_time')
+        as_gif  = (format_choice == "gif")
+        if format_choice == "audio":
+            fmt_opt = "audio"
+        elif format_choice in ("1080p", "720p", "480p", "360p"):
+            fmt_opt = format_choice
+        elif format_choice == "gif":
+            fmt_opt = "video"
+        else:
+            fmt_opt = "video"
+        await query.edit_message_text("⏳ *Queued for download...*", parse_mode="Markdown")
+        await add_to_queue(
+            url=url, message_to_reply=query.message,
+            format_opt=fmt_opt, custom_name=None,
+            start_time=start_t, end_time=end_t, as_gif=as_gif,
+            cached_title=cached['title'], cached_thumb=cached['thumbnail'],
+            user_id=user_id,
+            audio_title=cached.get('audio_title'),
+            audio_performer=cached.get('audio_performer')
         )
+        URL_CACHE.pop(url_id, None)
         return
 
     # Handle Direct Downloads / Cancellations / Trims
@@ -5027,23 +5027,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Setup download parameters
-        url = cached['url']
+        # Route download directly
+        url    = cached['url']
         start_t = cached.get('start_time')
-        end_t = cached.get('end_time')
-        as_gif = (choice == "gif")
-        is_web_upload = (delivery == "web")
-        
+        end_t   = cached.get('end_time')
+        as_gif  = (choice == "gif")
+
         if choice == "audio":
             fmt_opt = "audio"
         elif choice in ("1080p", "720p", "480p", "360p"):
             fmt_opt = choice
-        elif choice == "file":
-            fmt_opt = None
+        elif choice in ("gif", "file"):
+            fmt_opt = "video" if choice == "gif" else None
         else:
             fmt_opt = "video"
-        
-        await query.edit_message_text("⏳ *Adding to download queue... / اضافه شدن به صف*", parse_mode="Markdown")
+
+        await query.edit_message_text("⏳ *Queued! / اضافه شد به صف*", parse_mode="Markdown")
         await add_to_queue(
             url=url,
             message_to_reply=query.message,
@@ -5055,7 +5054,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cached_title=cached['title'],
             cached_thumb=cached['thumbnail'],
             user_id=user_id,
-            upload_mode="web" if is_web_upload else None,
             audio_title=cached.get('audio_title'),
             audio_performer=cached.get('audio_performer')
         )
@@ -5694,23 +5692,34 @@ async def direct_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def main_async(application):
+    # Clear any lingering webhook so /start and polling work reliably on Render
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook cleared — polling mode active.")
+    except Exception as e:
+        logger.warning(f"Could not clear webhook: {e}")
+
     await start_web_server()
     task = asyncio.create_task(queue_worker(application.bot))
     task.add_done_callback(lambda t: logger.error(f"Queue worker crashed: {t.exception()}") if not t.cancelled() and t.exception() else None)
 
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
+    await application.updater.start_polling(drop_pending_updates=True)
     logger.info("Bot is polling in the background...")
     while True:
         await asyncio.sleep(3600)
 
 async def local_main_async(application):
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
     task = asyncio.create_task(queue_worker(application.bot))
     task.add_done_callback(lambda t: logger.error(f"Queue worker crashed: {t.exception()}") if not t.cancelled() and t.exception() else None)
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
+    await application.updater.start_polling(drop_pending_updates=True)
     logger.info("Bot started. Listening for messages...")
     while True:
         await asyncio.sleep(3600)
