@@ -435,58 +435,62 @@ def _probe_best_format_id(url: str, target_height: int | None, audio_only: bool)
     """
     Runs yt-dlp --dump-json to get available formats, then picks the best
     real format_id. Returns None if probe fails (caller falls back to format strings).
-    Uses --impersonate chrome for sites that require browser impersonation.
+    NOTE: Never passes cookies for YouTube — android_vr client works without them.
     """
+    is_youtube = any(x in url.lower() for x in ["youtube.com", "youtu.be"])
     try:
-        cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--dump-json", "--no-download",
-               "--js-runtimes", "node"]
-        if is_impersonate_site(url) and _HAS_IMPERSONATE:
+        cmd = [sys.executable, "-m", "yt_dlp",
+               "--no-playlist", "--dump-json", "--no-download",
+               "--socket-timeout", "35"]
+
+        # Only pass cookies for non-YouTube sites
+        if not is_youtube:
+            cookie_path = COOKIES_PH_FILE if "pornhub.com" in url.lower() else None
+            if cookie_path and os.path.exists(cookie_path):
+                cmd += ["--cookies", cookie_path]
+
+        if is_impersonate_site(url) and _HAS_IMPERSONATE and not is_youtube:
             cmd += ["--impersonate", "chrome"]
-        cookie_path = COOKIES_PH_FILE if "pornhub.com" in url.lower() else None
-        if cookie_path and os.path.exists(cookie_path):
-            cmd += ["--cookies", cookie_path]
+
         proxy_url = get_proxy_url()
         if proxy_url:
             cmd += ["--proxy", proxy_url]
-        cmd += ["--extractor-args", f"youtube:player_client={','.join(YOUTUBE_PLAYER_CLIENTS)}"]
-        cmd += ["--socket-timeout", "30"]
+
+        # YouTube: use android_vr + web_embedded — no cookies, no PO token needed
+        if is_youtube:
+            cmd += ["--extractor-args", "youtube:player_client=android_vr,web_embedded,mweb"]
+
         cmd.append(url)
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=50)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
-            if os.path.exists(cookie_path):
-                logger.warning("Format probe failed with cookies, retrying without cookies...")
-                cmd_no_cookies = [x for x in cmd if x != cookie_path and x != "--cookies"]
-                result = subprocess.run(cmd_no_cookies, capture_output=True, text=True, timeout=50)
-                if result.returncode != 0:
-                    return None
-            else:
-                return None
+            err = result.stderr[-300:] if result.stderr else ""
+            logger.warning(f"Format probe failed (rc={result.returncode}): {err}")
+            return None
+
         info = json.loads(result.stdout)
         formats = info.get("formats", [])
         if not formats:
             return None
 
         if audio_only:
-            # Best audio-only format
             audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") != "none"]
             if not audio_formats:
                 audio_formats = formats
             best = max(audio_formats, key=lambda f: f.get("abr") or f.get("tbr") or 0)
             return best.get("format_id")
 
-        # Video: pick best video+audio combined, or best video stream for merging
         if target_height:
             candidates = [f for f in formats if (f.get("height") or 0) <= target_height and f.get("vcodec") != "none"]
         else:
             candidates = [f for f in formats if f.get("vcodec") != "none"]
 
         if not candidates:
-            candidates = formats  # fallback: anything
+            candidates = formats
 
         best = max(candidates, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
         return best.get("format_id")
     except Exception as e:
-        logger.warning(f"Format probe failed: {e}")
+        logger.warning(f"Format probe exception: {e}")
         return None
 
 # =====================================================================
@@ -1326,9 +1330,8 @@ def download_yt(url, dest_dir, format_opt, start_time, end_time, tracker):
         "http_headers": site_opts.pop("http_headers", base_headers),
         "ffmpeg_location": FFMPEG_EXE,
         "extractor_args": get_youtube_extractor_args({"skip": ["translated_subs"]}),
-        "socket_timeout": 30,
-        "js_runtimes": {"node": {}},
-        **get_ydl_cookie_opts(url),
+        "socket_timeout": 45,
+        **get_ydl_cookie_opts(url),   # Returns {} for YouTube (no cookies)
         **site_opts,
     }
 
